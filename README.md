@@ -8,10 +8,17 @@ This repository provides a suite of tools designed for Windows users to deploy, 
 2. **Download Scripts:** Save the following scripts into `C:\Conduit`:
    * `deploy_conduit_single_server.py`
    * `deploy_conduit_multi_server.py`
-   * `conduit_status_windows.py`
-   * `conduit_manager_windows.py`
+   * `conduit_status.py`
+   * `conduit_manager.py`
    
-   
+## SSH Genetaion
+2. **Open PowerShell:** Type `cmd` in your Windows search bar and press Enter to open the Command Prompt.
+   ```powershell
+   mkdir .ssh
+   cd .ssh
+   ssh-keygen -t ed25519 -f id_conduit
+   exit
+
 ## Python Installation
 
 1. **Download Python:** Visit [python.org/downloads](https://www.python.org/downloads) and download the latest version for Windows. Install with default parameters, ensuring you check the box **"Add Python to PATH."**
@@ -20,43 +27,41 @@ This repository provides a suite of tools designed for Windows users to deploy, 
    ```powershell
    cd C:\Conduit
    dir
-   
-Setup Pip: Ensure the Python package manager is up to date:  
-```powershell 
-py -m ensurepip --upgrade   
+      
+   py -m ensurepip --upgrade
 
-Install Required Packages:
-```powershell
-py -m pip install fabric paramiko
+   Install Required Packages:
+
+   py -m pip install fabric paramiko
+   ```
 
 ---
 
-### Section 3: Deployment
-```markdown
+
 ## Conduit Deployment
 
 ### Single Server
 Run the following command to deploy to a single target. You will be prompted for the IP address and root password:
-```powershell
-py deploy_conduit_single_server.py
-
-
+   ```powershell
+   py deploy_conduit_single_server.py
+   ```
 ### Multi Server
 For batch deployment, create a file named ip.txt in the C:\Conduit folder. Add one IP address per line. This script assumes all servers share the same root password.
-```powershell
-py deploy_conduit_multi_server.py
 
+   ```powershell
+   py deploy_conduit_multi_server.py
+   ```
 ---
 
-### Section 4: Monitoring
-```markdown
 ## Monitoring
 
 After installation, the Psiphon network requires time for vetting and propagation. This can take anywhere from a few minutes to several hours.
 
 To monitor your current server status, run:
-```powershell
-py conduit_status_windows.py
+
+   ```powershell
+   py conduit_status_windows.py
+   ```
 
 Cycle: This script runs every hour by default.
 
@@ -64,22 +69,21 @@ Customization: To change the interval, edit CHECK_INTERVAL_SECONDS (line 14) in 
 
 ---
 
-### Section 5: Management and servers.txt
-```markdown
 ## Management
 
 The `conduit_manager_windows.py` script allows you to check status, stop, start, restart, or reset the service. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and likely get clients.
+   ```powershell
+   py conduit_manager_windows.py
+   ```
 
 ### Using servers.txt
-For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory.
+For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory. Please keep the header in top row.
 
 **Format:**
 `name,hostname,port,username,password`
 
 **Example:**
 `MyServer,123.45.67.89,22,root,Password123`
-
-Section 6: Troubleshooting and Notes
 
 ## Troubleshooting
 

@@ -12,6 +12,10 @@ SERVER_FILE = "servers.txt"
 LOG_FILE = "conduit.log"
 MAX_WORKERS = 15
 CHECK_INTERVAL_SECONDS = 300 
+
+# Automatically define the key path (Assuming it's in ~/.ssh/id_conduit)
+HOME_PATH = os.path.expanduser("~")
+SSH_KEY_PATH = os.path.join(HOME_PATH, ".ssh", "id_conduit")
 # ==========================================
 
 def strip_ansi(text):
@@ -41,10 +45,7 @@ def parse_to_float(s):
     return float(match.group(1)) if match else 0.0
 
 def load_servers(filename, verbose=False):
-    """
-    Reads the server file. 
-    If verbose=True, prints the name and hostname for the user.
-    """
+    """Reads the server file (name, ip, port, user)."""
     servers = []
     if not os.path.exists(filename):
         print(f"[!] Error: {filename} not found."); sys.exit(1)
@@ -57,14 +58,14 @@ def load_servers(filename, verbose=False):
     
     for i, line in enumerate(lines[1:], start=2):
         parts = [p.strip().replace('"', '').replace("'", "") for p in line.split(',')]
-        if len(parts) >= 5:
+        # Updated to handle 4 columns (name, ip, port, user)
+        if len(parts) >= 4:
             try:
                 s_data = {
                     "name": parts[0], 
                     "hostname": parts[1], 
                     "port": int(parts[2]), 
-                    "username": parts[3], 
-                    "password": parts[4]
+                    "username": parts[3]
                 }
                 servers.append(s_data)
                 if verbose:
@@ -74,12 +75,19 @@ def load_servers(filename, verbose=False):
 
 def get_conduit_status(server):
     result = {"hostname": server["hostname"], "success": False, "status": "N/A", "max_clients": "N/A", "clients": "N/A", "bandwidth": "N/A", "upload": "N/A", "download": "N/A", "uptime": "N/A", "average_download_mbps": "N/A"}
+    
     config = Config(overrides={'run': {'pty': True}})
-    connect_kwargs = {"password": server["password"], "look_for_keys": False, "disabled_algorithms": dict(pubkeys=["rsa-sha2-256", "rsa-sha2-512"])}
+    # Updated to use SSH Key Filename instead of Password
+    connect_kwargs = {
+        "key_filename": SSH_KEY_PATH,
+        "look_for_keys": False, 
+        "allow_agent": False
+    }
+
     try:
         with Connection(host=server["hostname"], user=server["username"], port=server["port"], connect_kwargs=connect_kwargs, config=config) as conn:
             try:
-                res = conn.run("/opt/conduit/conduit service status -f", hide=True, timeout=5)
+                res = conn.run("/opt/conduit/conduit service status -f", hide=True, timeout=10)
                 output = res.stdout
             except Exception as e:
                 output = getattr(e.result, 'stdout', str(e)) if hasattr(e, 'result') else str(e)
@@ -118,7 +126,6 @@ def get_conduit_status(server):
     return result
 
 def run_cycle():
-    # Load servers quietly during cycles
     SERVERS = load_servers(SERVER_FILE, verbose=False)
     results = []
     
@@ -177,10 +184,14 @@ def run_cycle():
 
 if __name__ == "__main__":
     print(f"{'='*50}")
-    print(f"       CONDUIT MONITORING INITIALIZATION")
+    print(f"        CONDUIT MONITORING INITIALIZATION")
     print(f"{'='*50}")
     
-    # Run the verbose load ONCE here
+    # Check for key existence first
+    if not os.path.exists(SSH_KEY_PATH):
+        print(f"[!] Warning: SSH Key not found at {SSH_KEY_PATH}")
+        print("[!] Ensure you have generated the key or updated the script config.")
+    
     load_servers(SERVER_FILE, verbose=True)
     
     print(f"\n[*] Logging active: {LOG_FILE}")
