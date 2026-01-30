@@ -110,10 +110,44 @@ class ServerWorker(QThread):
                     else:
                         return c.run(cmd, hide=True, warn=True)
 
+                if self.action == "reset":
+                    # 1. Stop the service
+                    run_cmd("systemctl stop conduit")
+                    
+                    # 2. Wipe the data directory (CAUTION: Destructive)
+                    # We use -rf to ensure it clears everything inside
+                    run_cmd("rm -rf /var/lib/conduit/*")
+                    
+                    # 3. Apply Config if requested
+                    if self.config['update']:
+                        cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                        run_cmd("systemctl daemon-reload")
+                    
+                    # 4. Start service
+                    run_cmd("systemctl start conduit")
+                    return f"[!] {s['name']}: FULL RESET COMPLETE (Data wiped & restarted)."
+
                 if self.action == "status":
                     res = run_cmd("systemctl is-active conduit")
                     state = "Active" if res.ok else "Inactive"
                     return f"[*] {s['name']} ({s['ip']}): {state}"
+
+                service_file = "/etc/systemd/system/conduit.service"
+                
+                if self.action == "stop":
+                    c.sudo("systemctl stop conduit", hide=True)
+                    return f"[-] [{name}] Stopped."
+
+                if self.action in ["start", "restart"]:
+                    if self.config_data['update']:
+                        exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config_data['clients']} --bandwidth {self.config_data['bw']} --data-dir /var/lib/conduit"
+                        sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
+                        c.sudo(sed_cmd, hide=True)
+                        c.sudo("systemctl daemon-reload", hide=True)
+                    
+                    c.sudo(f"systemctl {self.action} conduit", hide=True)
+                    return f"[+] [{name}] {self.action.capitalize()}ed."
 
                 # ... (rest of the start/stop/restart logic using run_cmd)
                 
@@ -174,6 +208,7 @@ class ConduitGUI(QMainWindow):
         ctrl_lay = QHBoxLayout()
         self.btn_start = QPushButton("Start"); self.btn_stop = QPushButton("Stop")
         self.btn_re = QPushButton("Re-Start"); self.btn_reset = QPushButton("Reset")
+        self.btn_re.setToolTip("Use Restart if server is already running.")
         self.btn_stat = QPushButton("Status"); self.btn_quit = QPushButton("Quit")
         self.btn_reset.setToolTip("Use if clients not added after hours or server waiting to connect.")
         for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_quit]:
@@ -194,12 +229,52 @@ class ConduitGUI(QMainWindow):
         self.btn_quit.clicked.connect(self.close)
         self.rad_name.toggled.connect(self.sync_ui)
         self.rad_ip.toggled.connect(self.sync_ui)
-        self.btn_re.clicked.connect(lambda: QMessageBox.information(self, "Info", "Use Restart if server is already running."))
-        self.btn_start.clicked.connect(lambda: self.run_worker("start"))
-        self.btn_stop.clicked.connect(lambda: self.run_worker("stop"))
-        self.btn_stat.clicked.connect(lambda: self.run_worker("status"))
+#        self.btn_re.clicked.connect(lambda: QMessageBox.information(self, "Info", "Use Restart if server is already running."))
 
-    # --- Robust Logic Methods ---
+        self.btn_start.clicked.connect(lambda: self.confirm_action("start"))
+        self.btn_stop.clicked.connect(lambda: self.confirm_action("stop"))
+        self.btn_re.clicked.connect(lambda: self.confirm_action("restart"))
+        self.btn_reset.clicked.connect(self.confirm_reset)
+
+    def confirm_action(self, action):
+        """Standard guard for Start, Stop, and Restart"""
+        count = self.sel.count()
+        if count == 0:
+            QMessageBox.warning(self, "No Selection", "Please add servers to the 'Selected' list first.")
+            return
+
+        # Personalize the message based on the action
+        action_title = action.capitalize()
+        if action == "restart":
+            msg = f"Are you sure you want to RESTART the Conduit service on {count} server(s)?"
+            icon = QMessageBox.Question
+        elif action == "stop":
+            msg = f"WARNING: This will STOP the service on {count} server(s).\nContinue?"
+            icon = QMessageBox.Warning
+        else:
+            msg = f"Start the Conduit service on {count} server(s)?"
+            icon = QMessageBox.Information
+
+        reply = QMessageBox.question(self, f"Confirm {action_title}", msg, 
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            self.run_worker(action)
+
+    def confirm_reset(self):
+        """Safety check before performing a destructive reset"""
+        targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
+        
+        if not targets:
+            QMessageBox.warning(self, "Reset", "No servers selected in the right-side list.")
+            return
+
+        msg = f"WARNING: This will stop the service and DELETE ALL DATA in /var/lib/conduit/ on {len(targets)} server(s).\n\nAre you absolutely sure?"
+        reply = QMessageBox.critical(self, "Confirm Full Reset", msg, 
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            self.run_worker("reset")
 
     def create_item(self, s):
         """Creates a list item with a hidden IP key."""
