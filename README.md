@@ -1,4 +1,4 @@
-# Psiphon Conduit Crossplatform Setup for Windows , Linux, and macOS
+# Psiphon Conduit Cross Platform Setup for Windows , Linux, and macOS
 
 This repository provides a suite of tools designed for users to deploy, monitor, and manage **Psiphon Conduit** on remote Linux servers.
 
