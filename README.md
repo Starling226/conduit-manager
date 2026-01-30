@@ -37,7 +37,8 @@ For batch deployment, create a file named ip.txt in the C:\Conduit folder. Add o
 
 ## Management
 
-The `ConduitQt.py` is an Qt desgined Gui that allows you check status, stop, start, restart, or reset the service interactively. This Gui is cross platform and works in Windows and Linux environments.
+The `ConduitQt.py` is a Qt desgined Gui that allows you add, remove, update the servers, check status, stop, start, restart, or reset the service interactively. This Gui is cross platform and works in Windows and Linux environments.
+
 The `conduit_manager_windows.py` script allows you to check status, stop, start, restart, or reset the service. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and likely get clients.
    ```powershell
    py conduit_manager_windows.py
