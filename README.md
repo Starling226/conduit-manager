@@ -11,6 +11,7 @@ This repository provides a suite of tools designed for Windows users to deploy, 
    * `conduit_status.py`
    * `conduit_manager.py`
    * `setup_conduit.bat`
+   * `ConduiQt.py`
    
 ## SSH Genetaion and Python Installation
 **Setup:** From the Conduit folder double click on `setup_conduit.bat`. This will generate ssh keys in .ssh folder in user home folder and install the required python packages.
@@ -18,9 +19,11 @@ This repository provides a suite of tools designed for Windows users to deploy, 
 ---
 
 ## Conduit Deployment
+### Running Python Scripts
+To run any of the Python scripts simply double click on each file or run them in the command line terminal using the py command.
 
 ### Single Server
-Within the cmd terminal run the following command to deploy to a single target. You will be prompted for the IP address and root password:
+run the following command to deploy to a single target. You will be prompted for the IP address and root password:
    ```powershell
    py deploy_conduit_single_server.py
    ```
@@ -34,6 +37,7 @@ For batch deployment, create a file named ip.txt in the C:\Conduit folder. Add o
 
 ## Management
 
+The `ConduitQt.py` is an Qt desgined Gui that allows you check status, stop, start, restart, or reset the service interactively. This Gui is cross platform and works in Windows and Linux environments.
 The `conduit_manager_windows.py` script allows you to check status, stop, start, restart, or reset the service. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and likely get clients.
    ```powershell
    py conduit_manager_windows.py
