@@ -1,11 +1,12 @@
-# Psiphon Conduit Setup for Windows
+# Psiphon Conduit Setup
 
 This repository provides a suite of tools designed for Windows users to deploy, monitor, and manage **Psiphon Conduit** on remote Linux servers.
 
 ## Download and Preparations
+1. **Python Instalation:** Please visist https://www.python.org/downloads/ and install the latest python
 
-1. **Create Directory:** Create a folder named `Conduit` in your `C:\` partition.
-2. **Download Scripts:** Save the following scripts into `C:\Conduit`:
+2. **Create Directory:** Create a folder named `Conduit` in your `C:\` partition in Windows or /opt/conduit in Linux environment.
+3. **Download Scripts:** Save the following scripts into `C:\Conduit` or /opt/conduit:
    * `deploy_conduit_single_server.py`
    * `deploy_conduit_multi_server.py`
    * `conduit_status.py`
@@ -14,7 +15,7 @@ This repository provides a suite of tools designed for Windows users to deploy, 
    * `ConduiQt.py`
    
 ## SSH Genetaion and Python Installation
-**Setup:** From the Conduit folder double click on `setup_conduit.bat`. This will generate ssh keys in .ssh folder in user home folder and install the required python packages.
+**Setup:** From the Conduit folder double click on `setup_conduit.bat` for Windows or run `setup_conduit.sh` in terminal. This will generate ssh keys in .ssh folder in user home folder and install the required python packages.
 
 ---
 
