@@ -22,6 +22,8 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
+CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+
 # --- 1. Dialog for Add/Edit (Compact Design) ---
 class ServerDialog(QDialog):
     def __init__(self, parent=None, data=None):
@@ -126,7 +128,7 @@ class ServerWorker(QThread):
                 if self.action == "reset":
                     # 1. Stop the service
                     run_cmd("systemctl stop conduit")
-                    
+                    time.sleep(2)
                     # 2. Wipe the data directory (CAUTION: Destructive)
                     # We use -rf to ensure it clears everything inside
                     run_cmd("rm -rf /var/lib/conduit/*")
@@ -141,10 +143,24 @@ class ServerWorker(QThread):
                     run_cmd("systemctl start conduit")
                     return f"[!] {s['name']}: FULL RESET COMPLETE (Data wiped & restarted)."
 
+#                if self.action == "status":
+#                    res = run_cmd("systemctl is-active conduit")
+#                    state = "Active" if res.ok else "Inactive"
+#                    return f"[*] {s['name']} ({s['ip']}): {state}"
+
                 if self.action == "status":
-                    res = run_cmd("systemctl is-active conduit")
-                    state = "Active" if res.ok else "Inactive"
-                    return f"[*] {s['name']} ({s['ip']}): {state}"
+                    # 1. Get the standard systemctl status (Active/Inactive)
+                    status_res = run_cmd("systemctl is-active conduit")
+                    current_status = status_res.stdout.strip() if status_res.ok else "inactive"
+                    current_status = f"[*] {s['name']} ({s['ip']}): { current_status.upper()}"
+
+                    # 2. Get the last 5 lines of the journal
+                    log_res = run_cmd("journalctl -u conduit.service -n 10 --no-pager")
+                    journal_logs = log_res.stdout if log_res.ok else "No logs found."
+
+                    # 3. Combine them for the UI
+                    output = f"--- STATUS: {current_status} ---\n{journal_logs}"
+                    return output
 
                 service_file = "/etc/systemd/system/conduit.service"
                 
@@ -402,6 +418,104 @@ class DeployWorker(QThread):
                 conn.run(f'echo "{pub_key}" >> ~/.ssh/authorized_keys', hide=True)
                 conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
 
+                # 2. Cleanup & Directory Prep
+                conn.run("systemctl stop conduit", warn=True, hide=True)
+                time.sleep(2)
+                conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
+                conn.run("mkdir -p /opt/conduit", hide=True)
+                # Crucial: The service hardening requires this directory to exist beforehand
+                conn.run("mkdir -p /var/lib/conduit", hide=True) 
+
+                pkg_cmd = "dnf install wget firewalld curl -y" if conn.run("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
+                conn.run(pkg_cmd, hide=True)
+
+                # 3. Download Binary
+#                url = "https://github.com/ssmirr/conduit/releases/download/e421eff/conduit-linux-amd64"
+#                url = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+#                conn.run(f"curl -L -o /opt/conduit/conduit {url}", hide=True)
+                conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
+                conn.run("chmod +x /opt/conduit/conduit")
+
+                # 4. Manually Create the Service File (Replacing 'service install')
+                service_content = f"""[Unit]
+Description=Psiphon Conduit inproxy service - relays traffic for users in censored regions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit
+Restart=always
+RestartSec=10
+User=root
+Group=root
+WorkingDirectory=/opt/conduit/
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/conduit
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+"""
+                # Escape single quotes in the content if any (though there are none currently)
+                # We use sudo tee to write to the protected system directory
+                conn.run(f"echo '{service_content}' | sudo tee /etc/systemd/system/conduit.service > /dev/null")
+
+                # 5. Reload, Enable, and Start
+                conn.run("systemctl daemon-reload", hide=True)
+                conn.run("systemctl enable conduit", hide=True)
+                conn.run("systemctl start conduit", hide=True)
+                
+                return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
+        except Exception as e:
+            return f"[ERROR] {s['ip']} failed: {str(e)}"
+
+class DeployWorker_old(QThread):
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, targets, params):
+        super().__init__()
+        self.targets = targets
+        self.params = params # password, max_clients, bandwidth, user
+
+    def run(self):
+        # Read the public key once
+        home = os.path.expanduser("~")
+        pub_key_path = os.path.join(home, ".ssh", "id_conduit.pub")
+        
+        if not os.path.exists(pub_key_path):
+            self.log_signal.emit(f"[ERROR] Public key not found at: {pub_key_path}")
+            return
+
+        with open(pub_key_path, "r") as f:
+            pub_key_content = f.read().strip()
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(self.deploy_task, s, pub_key_content) for s in self.targets]
+            for f in as_completed(futures):
+                self.log_signal.emit(f.result())
+
+    def deploy_task(self, s, pub_key):
+        try:
+            config = Config(overrides={'run': {'pty': True}, 'timeouts': {'connect': 20}})
+            conn_params = {
+                "password": self.params['password'],
+                "look_for_keys": False,
+                "allow_agent": False
+            }
+
+            with Connection(host=s['ip'], user=self.params['user'], port=int(s['port']), 
+                            connect_kwargs=conn_params, config=config) as conn:
+                
+                # 1. Key Injection
+                conn.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh", hide=True)
+                conn.run(f'echo "{pub_key}" >> ~/.ssh/authorized_keys', hide=True)
+                conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
+
                 # 2. Cleanup & Install Dependencies
                 conn.run("systemctl stop conduit", warn=True, hide=True)
                 conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
@@ -448,6 +562,23 @@ class ConduitGUI(QMainWindow):
         self.btn_import = QPushButton("Import servers.txt")
         self.lbl_path = QLabel("No file loaded")
         file_box.addWidget(self.btn_import); file_box.addWidget(self.lbl_path); file_box.addStretch()
+
+        # Version Label
+#        self.lbl_version = QLabel("Conduit Version: 2fd31d4")
+        # Automatically extract 'version' from the URL
+        version_tag = CONDUIT_URL.split('/')[-2] 
+        self.lbl_version = QLabel(f"Conduit Version: {version_tag}")
+        self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
+
+        # Order of adding matters for the "Far Right" effect:
+        file_box.addWidget(self.btn_import)
+        file_box.addWidget(self.lbl_path)
+        
+        # This stretch pushes everything after it to the right wall
+        file_box.addStretch() 
+        
+        file_box.addWidget(self.lbl_version)
+
         layout.addLayout(file_box)
 
         cfg_frame = QFrame(); cfg_frame.setFrameShape(QFrame.StyledPanel)
