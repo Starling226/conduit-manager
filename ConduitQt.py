@@ -523,24 +523,24 @@ class ConduitGUI(QMainWindow):
         file_box = QHBoxLayout()
         self.btn_import = QPushButton("Import servers.txt")
         self.lbl_path = QLabel("No file loaded")
-        file_box.addWidget(self.btn_import); file_box.addWidget(self.lbl_path); file_box.addStretch()
+        file_box.addWidget(self.btn_import);
+        file_box.addWidget(self.lbl_path); 
+        file_box.addStretch(1)
 
-        # Version Label
-#        self.lbl_version = QLabel("Conduit Version: 2fd31d4")
-        # Automatically extract 'version' from the URL
-        version_tag = CONDUIT_URL.split('/')[-2] 
+        try:
+            # Automatically extract 'version' from the URL
+            version_tag = CONDUIT_URL.split('/')[-2]
+        except (NameError, IndexError):
+            version_tag = "Unknown"
+
         self.lbl_version = QLabel(f"Conduit Version: {version_tag}")
         self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
-
-        # Order of adding matters for the "Far Right" effect:
-        file_box.addWidget(self.btn_import)
-        file_box.addWidget(self.lbl_path)
         
         # This stretch pushes everything after it to the right wall
-        file_box.addStretch() 
+#        file_box.addStretch(1) 
         
         file_box.addWidget(self.lbl_version)
-
+        
         layout.addLayout(file_box)
 
         cfg_frame = QFrame(); cfg_frame.setFrameShape(QFrame.StyledPanel)
