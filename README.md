@@ -20,8 +20,45 @@ This repository provides a suite of tools designed for users to deploy, monitor,
 ---
 
 ## Conduit Deployment
-### Running Ineractive GUI
-The interactive GUI `ConduitQt.py` is a multi-threaded cross platform application designed using PyQt5 in Windows, Linux, and macOS Environmnets.  It is designed to do everything you need, to deploy a conduit server, manage and monitor the current status of the server. GUI is self explanatory. You can add new servers and delete your existing servers from a text file names servers.txt. To do the opration simply move one or a group of of the server to list on the right, and start doing the operation. **Plese note every server in the right list will be used for the requested operation, no matter it has been selected or not** When Apply Config Changes is cheked, you can press Start or restart to update the conduit parameters. The rest of the script are invidual applications you can run them for similar funtionalities in Windows.
+## 🖥️ Interactive GUI: Conduit Management Console
+
+The `ConduitQt.py` application is a robust, multi-threaded, cross-platform management suite built with **PyQt5**. It provides a unified interface for deploying, managing, and monitoring Conduit servers across **Windows, Linux, and macOS** environments.
+
+### 🚀 Key Features
+
+* **Dynamic Server Management**: Easily manage your infrastructure via the `servers.txt` configuration file. Add, edit, or remove servers, and the GUI reflects changes instantly.
+* **Batch Operations**: The interface uses a "Targeting" system. Simply move servers to the **Right List (Target List)** to include them in an action.
+    > **Note:** Every server in the Right List will be included in the requested operation (Deploy, Start, Stop, or Reset), regardless of whether it is currently highlighted.
+* **Real-time Monitoring**: The multi-threaded architecture ensures the UI remains responsive while performing heavy deployment tasks or fetching live statistics from multiple nodes simultaneously.
+* **Configuration Updates**: By enabling the **"Apply Config Changes"** checkbox, you can push new parameters (such as client limits or bandwidth caps) to your servers during a *Start* or *Restart* command.
+
+
+
+---
+
+### 🛠️ How to Use
+
+1.  **Import**: Load your `servers.txt` to populate the available server list.
+2.  **Target**: Move the desired servers from the left panel to the right-hand (Target) panel.
+3.  **Execute**: Choose your operation (e.g., *Fresh Deployment*, *Reset*, or *Stop*).
+4.  **Monitor**: Follow real-time progress and logs in the integrated console output.
+
+---
+
+### 📂 Component Overview
+
+While `ConduitQt.py` is the primary cross-platform tool, the repository includes specialized scripts for specific environments:
+
+| Component | Platform | Primary Use Case |
+| :--- | :--- | :--- |
+| **ConduitQt.py** | Cross-Platform | Full-featured visual management & bulk deployment. |
+| **Staandalone Scripts** | Windows | Lightweight, task-specific CLI operations for Windows. |
+
+---
+
+### ⚠️ Important Security Note
+During a **Fresh Deployment**, if a root password is provided in `servers.txt`, the application will use it to install your SSH public key (`id_conduit.pub`). Once the deployment is successful and the key is verified, the application will automatically strip the root password from your `servers.txt` file for security.
+
 
 ### Screenshot of the Conduit Manager Qt Application
 
@@ -57,7 +94,7 @@ The `conduit_manager_windows.py` script allows you to check status, stop, start,
    ```
 
 ### Using servers.txt
-For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory. Please keep the header in top row. default port is 22.
+For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory that you run any of the scripts. Default port is 22. Upon successfull deployment the ssh public key will be injected to the server and root password will be removed from servers.txt. You must add root server for deployment if you plan to deploy mutiple servers simultaneouly. If you plan to deploy single server through the GUI applcation you will be prompted to enter the root password. Any comunication with the server will be perfomred using the ssh keys after successfull deployment.
 
 **Format:**
 `name,hostname,port,username`
