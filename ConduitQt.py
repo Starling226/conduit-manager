@@ -11,9 +11,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, QInputDialog,
                              QCheckBox, QListWidget, QListWidgetItem, QPlainTextEdit, 
                              QFileDialog, QMessageBox, QFrame, QAbstractItemView, 
-                             QRadioButton, QButtonGroup, QDialog, QFormLayout)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+                             QRadioButton, QButtonGroup, QDialog, QFormLayout, 
+                             QTableWidgetItem, QTableWidget, QHeaderView)
+
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QBrush
 from fabric import Connection, Config
 
 # --- PLATFORM SPECIFIC FIXES ---
@@ -24,6 +27,16 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     print("[INFO] macOS High-DPI Scaling Enabled")
 
 CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+
+class NumericTableWidgetItem(QTableWidgetItem):
+    def __init__(self, text, sort_value):
+        super().__init__(text)
+        self.sort_value = sort_value
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            return self.sort_value < other.sort_value
+        return super().__lt__(other)
 
 # --- 1. Dialog for Add/Edit (Compact Design) ---
 class ServerDialog(QDialog):
@@ -64,6 +77,162 @@ class ServerDialog(QDialog):
             "user": self.user_edit.text().strip(),
             "pass": self.pass_edit.text().strip()
         }
+
+
+class AutoStatsWorker(QThread):
+    # This signal sends the raw list of dictionaries to update_stats_table
+    stats_ready = pyqtSignal(list)
+
+    def __init__(self, targets, display_mode, time_window):
+        super().__init__()
+        self.targets = targets
+        self.display_mode = display_mode
+        self.time_window = time_window # Format: "X minutes ago"
+
+    def run(self):
+        results = []
+        # Using 15 workers just like your StatsWorker for fast parallel fetching
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            futures = [executor.submit(self.get_stats, s) for s in self.targets]
+            for f in as_completed(futures):
+                results.append(f.result())
+        
+        # Sort by IP or clients if preferred, then emit to GUI
+        self.stats_ready.emit(results)
+
+    def get_stats(self, s):
+        res = {"ip": s['ip'], "success": False, "clients": "0", "up_val": "0 B", "down_val": "0 B"}
+        
+        try:
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 5}
+
+            with Connection(host=s['ip'], user=s['user'], port=int(s['port']), connect_kwargs=connect_kwargs) as conn:
+                # 1. Check if the service is actually RUNNING right now
+                status_check = conn.run("systemctl is-active conduit.service", hide=True, warn=True)
+                is_running = status_check.stdout.strip() == "active"
+
+                if not is_running:
+                    res["success"] = False
+                    res["clients"] = "Stopped"
+                    return res
+
+                # 2. If running, get the logs for the requested window
+                cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
+                result = conn.run(cmd, hide=True, timeout=12)
+                output = result.stdout.strip()
+
+                if output:
+                    lines = output.splitlines()
+                    # Using your regex pattern...
+                    pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)")
+                    
+                    data_points = []
+                    for line in lines:
+                        m = pattern.search(line)
+                        if m:
+                            data_points.append({
+                                'c': int(m.group(1)),
+                                'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
+                                'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}")
+                            })
+
+                    if data_points:
+                        res["success"] = True
+                        first, last = data_points[0], data_points[-1]
+                        avg_clients = sum(d['c'] for d in data_points) / len(data_points)
+                        res["clients"] = str(int(round(avg_clients)))
+                        res["up_val"] = self.format_bytes(max(0, last['u'] - first['u']))
+                        res["down_val"] = self.format_bytes(max(0, last['d'] - first['d']))
+                else:
+                    res["clients"] = "No Data"
+                    
+        except Exception:
+            res["clients"] = "Offline"
+            
+        return res
+
+    def get_stats2(self, s):
+        display_label = s['name'] if self.display_mode == 'name' else s['ip']
+        res = {
+            "label": display_label, 
+            "ip": s['ip'],
+            "success": False, 
+            "clients": "0", 
+            "up_1h": "0 B", 
+            "down_1h": "0 B"
+        }
+        
+        try:
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+            connect_kwargs = {
+                "key_filename": [key_path], 
+                "look_for_keys": False, 
+                "allow_agent": False, 
+                "timeout": 8
+            }
+
+            with Connection(host=s['ip'], user=s['user'], port=int(s['port']), connect_kwargs=connect_kwargs) as conn:
+                # Command to get last 1 hour of raw stats
+#                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
+                cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
+                result = conn.run(cmd, hide=True, timeout=12)
+                output = result.stdout.strip()
+
+                if output:
+                    lines = output.splitlines()
+                    pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)")
+                    
+                    data_points = []
+                    for line in lines:
+                        m = pattern.search(line)
+                        if m:
+                            data_points.append({
+                                'c': int(m.group(1)),
+                                'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
+                                'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}")
+                            })
+
+                    if data_points:
+                        res["success"] = True
+                        first = data_points[0]
+                        last = data_points[-1]
+
+                        # Calculate Average Clients (1h)
+                        avg_clients = sum(d['c'] for d in data_points) / len(data_points)
+                        res["clients"] = str(int(round(avg_clients)))
+
+                        # Hourly Growth (Delta)
+                        res["up_1h"] = self.format_bytes(max(0, last['u'] - first['u']))
+                        res["down_1h"] = self.format_bytes(max(0, last['d'] - first['d']))
+                else:
+                    res["clients"] = "No Data"
+
+        except Exception:
+            res["clients"] = "Error"
+            
+        return res
+
+    def parse_to_bytes(self, s):
+        if not s or "0B" in s: return 0.0
+        match = re.search(r'([\d\.]+)', s)
+        if not match: return 0.0
+        num = float(match.group(1))
+        u = s.upper()
+        if 'TB' in u: return num * 1024**4
+        if 'GB' in u: return num * 1024**3
+        if 'MB' in u: return num * 1024**2
+        if 'KB' in u: return num * 1024
+        return num
+
+    def format_bytes(self, b):
+        if b == 0: return "0 B"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if b < 1024: return f"{b:.2f} {unit}"
+            b /= 1024
+        return f"{b:.2f} PB"
 
 # --- 2. Background Worker (SSH) ---
 class ServerWorker(QThread):
@@ -259,7 +428,7 @@ class StatsWorker(QThread):
             
         return res
 
-    def format_bytes(self, size):
+    def format_bytes2(self, size):
         """Helper to convert bytes back to human readable string"""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size < 1024.0:
@@ -332,16 +501,25 @@ class StatsWorker(QThread):
         
         # Clients are already stored as average strings, so we convert back to int for analytics
         clients_list = [int(r["clients"]) for r in valid_results if r["clients"].isdigit()]
-        total_clients = sum(clients_list)
-        
+        total_clients = sum(clients_list)        
         ups = [self.parse_to_bytes(r["up"]) for r in valid_results]
         downs = [self.parse_to_bytes(r["down"]) for r in valid_results]
         mbps_list = [r["mbps_val"] for r in valid_results]
+
+        server_count = len(valid_results)
+        total_up_all = sum(ups)
+        total_down_all = sum(downs)
+        total_up_1h = sum([self.parse_to_bytes(r["up_1h"]) for r in valid_results])
+        total_down_1h = sum([self.parse_to_bytes(r["down_1h"]) for r in valid_results])
 
         out = []
         out.append(f"\n--- Analytics Summary (Iran Time: {ts}) ---")
         out.append(f"Total Average Clients across all servers: {total_clients}\n")
         
+        # Printing the specific totals you requested
+        out.append(f"\nTotal UP across {server_count} servers: {self.format_bytes(total_up_all)} | Total UP in last one hour: {self.format_bytes(total_up_1h)}")
+        out.append(f"Total Down across {server_count} servers: {self.format_bytes(total_down_all)} | Total DOWN in last one hour: {self.format_bytes(total_down_1h)}\n")
+
         out.append(f"{'Metric':<12} │ {'Mean':<12} │ {'Median':<12} │ {'Min':<12} │ {'Max':<12}")
         sep_line = f"{'─'*13}┼{'─'*14}┼{'─'*14}┼{'─'*14}┼{'─'*14}"
         out.append(sep_line)
@@ -575,6 +753,11 @@ class ConduitGUI(QMainWindow):
         self.setMinimumSize(1100, 800)
         self.server_data = [] 
         self.current_path = ""
+
+        # Timer for Auto-Refresh
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.run_auto_stats)
+
         self.init_ui()
         self.check_initial_file()
 
@@ -608,19 +791,115 @@ class ConduitGUI(QMainWindow):
 
         cfg_frame = QFrame(); cfg_frame.setFrameShape(QFrame.StyledPanel)
         cfg_lay = QHBoxLayout(cfg_frame)
-        cfg_lay.addWidget(QLabel("Max Clients:")); self.edit_clients = QLineEdit("225")
+
+    # Helper to apply consistent width for the 4 entries
+        def set_fixed_entry(widget):
+            widget.setFixedWidth(80)
+            return widget
+
+        cfg_lay.addWidget(QLabel("Max Clients:"));
+#        self.edit_clients = QLineEdit("225")
+        self.edit_clients = set_fixed_entry(QLineEdit("225"))
         cfg_lay.addWidget(self.edit_clients)
-        cfg_lay.addWidget(QLabel("Max Bandwidth:")); self.edit_bw = QLineEdit("40.0")
+
+#        cfg_lay.addWidget(QLabel("Mbps:"));
+        cfg_lay.addWidget(QLabel("Bandwidth (Mbps):"));
+#        self.edit_bw = QLineEdit("40.0")
+        self.edit_bw = set_fixed_entry(QLineEdit("40.0"))
         cfg_lay.addWidget(self.edit_bw)
-        self.chk_upd = QCheckBox("Apply Config Changes"); cfg_lay.addWidget(self.chk_upd)
-        self.rad_name = QRadioButton("Display Name"); self.rad_ip = QRadioButton("Display IP")
-        self.rad_name.setChecked(True); cfg_lay.addWidget(self.rad_name); cfg_lay.addWidget(self.rad_ip)
+
+        # Field 3: Log Window (The new free parameter - in minutes)
+        cfg_lay.addWidget(QLabel("Log Win(min):")); 
+        self.edit_window = set_fixed_entry(QLineEdit("60"))
+        self.edit_window.setToolTip("Lookback window for logs (1-60 minutes)")
+        cfg_lay.addWidget(self.edit_window)
+
+
+# --- REFRESH ENTRY & BUTTON ---
+        cfg_lay.addSpacing(15)
+        cfg_lay.addWidget(QLabel("Refresh (min):"))
+        self.edit_refresh = set_fixed_entry(QLineEdit("5"))
+#        self.edit_refresh = QLineEdit("5")
+#        self.edit_refresh.setFixedWidth(35)
+        self.btn_refresh_now = QPushButton("↻") 
+        self.btn_refresh_now.setFixedWidth(30)
+        self.btn_refresh_now.setToolTip("Refresh Live Monitor Now")
+        cfg_lay.addWidget(self.edit_refresh)
+        cfg_lay.addWidget(self.btn_refresh_now)
+        self.edit_refresh.textChanged.connect(self.update_timer_interval)
+        self.btn_refresh_now.clicked.connect(self.run_auto_stats)
+        # ------------------------------
+
+        cfg_lay.addSpacing(10)
+        self.chk_upd = QCheckBox("Apply Config Changes")
+        cfg_lay.addWidget(self.chk_upd)
+        self.rad_name = QRadioButton("Display Name")
+        self.rad_ip = QRadioButton("Display IP")
+        self.rad_name.setChecked(True)
+        cfg_lay.addWidget(self.rad_name)
+        cfg_lay.addWidget(self.rad_ip)
+        cfg_lay.addStretch(1)
+
         layout.addWidget(cfg_frame)
 
         lists_lay = QHBoxLayout()
         self.pool = QListWidget(); self.sel = QListWidget()
         for l in [self.pool, self.sel]: l.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
+        # --- NEW LIVE MONITOR TABLE ---
+        self.stats_table = QTableWidget(0, 4)
+        self.stats_table.setHorizontalHeaderLabels(["IP Address", "Avg Clients (1h)", "Up (1h)", "Down (1h)"])
+#        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        header = self.stats_table.horizontalHeader()
+        header.setStretchLastSection(True)
+
+        header.setSectionResizeMode(0, QHeaderView.Stretch) # IP takes remaining space
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        
+        self.stats_table.setColumnWidth(1, 110)  # Reduced Avg Clients
+        self.stats_table.setColumnWidth(2, 110) # Reduced Up
+        self.stats_table.setColumnWidth(3, 110) # Reduced Down
+
+        self.stats_table.setStyleSheet("background-color: #f8f9fa; gridline-color: #dee2e6;")
+        self.stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stats_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+#        self.stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # ------------------------------
+        
+        # --- LIVE MONITOR TABLE (Right Panel) ---
+#        self.stats_table = QTableWidget(0, 4)
+        # ... (rest of table setup, including sorting enabled) ...
+        
+# --- FOOTER FOR TOTALS & TIMESTAMP ---
+        self.footer_frame = QFrame()
+        self.footer_frame.setFixedHeight(35) # Slightly taller for better padding
+        self.footer_frame.setStyleSheet("background-color: #f1f2f6; border-top: 1px solid #dcdcdc;")
+        footer_lay = QHBoxLayout(self.footer_frame)
+        footer_lay.setContentsMargins(15, 0, 15, 0)
+
+        # New Timestamp Label (Left Side)
+        self.lbl_last_updated = QLabel("Last Sync: Never")
+        self.lbl_last_updated.setStyleSheet("color: #7f8c8d; font-style: italic; font-size: 11px;")
+        footer_lay.addWidget(self.lbl_last_updated)
+
+        footer_lay.addStretch(1) # Pushes the stats to the right
+
+        # Metric Labels (Right Side)
+        self.lbl_total_clients = QLabel("Clients: 0")
+        self.lbl_total_up = QLabel("Up: 0 B")
+        self.lbl_total_down = QLabel("Down: 0 B")
+        
+        for lbl in [self.lbl_total_clients, self.lbl_total_up, self.lbl_total_down]:
+            lbl.setStyleSheet("font-weight: bold; color: #2c3e50;")
+            lbl.setFixedWidth(130)
+            footer_lay.addWidget(lbl)
+
+        layout.addWidget(self.stats_table)
+        layout.addWidget(self.footer_frame)
+
         mid_btns = QVBoxLayout()
         self.btn_add = QPushButton("Add Server (+)")
         self.btn_edit = QPushButton("Display/Edit")
@@ -633,7 +912,8 @@ class ConduitGUI(QMainWindow):
         mid_btns.addWidget(self.btn_add); mid_btns.addWidget(self.btn_edit); mid_btns.addSpacing(20)        
         mid_btns.addWidget(self.btn_del)
         
-        lists_lay.addWidget(self.pool); lists_lay.addLayout(mid_btns); lists_lay.addWidget(self.sel)
+        lists_lay.addWidget(self.pool,1); lists_lay.addLayout(mid_btns); lists_lay.addWidget(self.sel,1)
+        lists_lay.addWidget(self.stats_table, 2) # Giving the table more space
         layout.addLayout(lists_lay)
 
         ctrl_lay = QHBoxLayout()
@@ -708,7 +988,179 @@ class ConduitGUI(QMainWindow):
         self.btn_deploy.clicked.connect(self.run_deploy)
         self.btn_upgrade.clicked.connect(self.run_upgrade)
         
+        self.update_timer_interval() # Initialize timer
 
+    def parse_to_bytes(self, s):
+        if not s or "0 B" in s or "-" in s: return 0.0
+        match = re.search(r'([\d\.]+)', s)
+        if not match: return 0.0
+        num = float(match.group(1))
+        u = s.upper()
+        if 'TB' in u: return num * 1024**4
+        if 'GB' in u: return num * 1024**3
+        if 'MB' in u: return num * 1024**2
+        if 'KB' in u: return num * 1024
+        return num
+
+    def format_bytes(self, b):
+        if b == 0: return "0 B"
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if b < 1024: return f"{b:.2f} {unit}"
+            b /= 1024
+        return f"{b:.2f} PB"
+
+    def update_stats_table(self, results):
+        """Updates the table using custom numeric items to preserve unit display."""
+        self.stats_table.setSortingEnabled(False)
+        
+        win = self.edit_window.text()
+        self.stats_table.setHorizontalHeaderLabels([
+            "IP Address", "Avg Clients", f"Up ({win}m)", f"Down ({win}m)"
+        ])
+        self.stats_table.setRowCount(0)
+        
+        # Initial sort: Online first
+        results.sort(key=lambda x: int(x['clients']) if x.get('success') and x['clients'].isdigit() else -1, reverse=True)
+        
+        COLOR_ONLINE = QColor("#27ae60")
+        COLOR_OFFLINE = QColor("#c0392b")
+        BG_OFFLINE = QColor("#fff5f5")
+        
+        total_clients = 0
+        total_up_bytes = 0
+        total_down_bytes = 0
+        
+        for r in results:
+            row = self.stats_table.rowCount()
+            self.stats_table.insertRow(row)
+            
+            is_ok = r.get("success", False)
+            
+            # Numeric values for math/sorting
+            c_val = int(r["clients"]) if r["clients"].isdigit() else 0
+            u_bytes = self.parse_to_bytes(r["up_val"])
+            d_bytes = self.parse_to_bytes(r["down_val"])
+
+            if is_ok:
+                total_clients += c_val
+                total_up_bytes += u_bytes
+                total_down_bytes += d_bytes
+
+            # 1. IP Item (Standard)
+            ip_item = QTableWidgetItem(r["ip"])
+            
+            # 2. Client Item (Custom sort)
+            client_text = str(c_val) if is_ok else r["clients"]
+            client_item = NumericTableWidgetItem(client_text, c_val)
+
+            # 3. Up Item (Custom sort - displays text, sorts by bytes)
+            up_item = NumericTableWidgetItem(r["up_val"], u_bytes)
+
+            # 4. Down Item (Custom sort - displays text, sorts by bytes)
+            down_item = NumericTableWidgetItem(r["down_val"], d_bytes)
+
+            items = [ip_item, client_item, up_item, down_item]
+            
+            for col, item in enumerate(items):
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                
+                if is_ok:
+                    if col == 0:
+                        item.setForeground(QBrush(COLOR_ONLINE))
+                        f = item.font(); f.setBold(True); item.setFont(f)
+                else:
+                    item.setForeground(QBrush(COLOR_OFFLINE))
+                    item.setBackground(QBrush(BG_OFFLINE))
+                    if col > 0 and r["clients"] != "Stopped":
+                        item.setText("-")
+                        # Set sort value to -1 so offline servers go to bottom in desc sort
+                        if hasattr(item, 'sort_value'): item.sort_value = -1 
+                
+                if col != 0:
+                    item.setTextAlignment(Qt.AlignCenter)
+                
+                self.stats_table.setItem(row, col, item)
+
+        # Update Footer Labels
+        self.lbl_total_clients.setText(f"Clients: {total_clients}")
+        self.lbl_total_up.setText(f"Up: {self.format_bytes(total_up_bytes)}")
+        self.lbl_total_down.setText(f"Down: {self.format_bytes(total_down_bytes)}")
+
+        now = datetime.now().strftime("%H:%M:%S")
+        self.lbl_last_updated.setText(f"Last Sync: {now}")
+
+        self.stats_table.setSortingEnabled(True)
+
+
+    def update_timer_interval(self):
+        """Restarts the timer with the interval specified in the Refresh box."""
+        try:
+            val = self.edit_refresh.text().strip()
+            if val:
+                mins = float(val)
+                if mins > 0:
+                    # Restarts the countdown from 0
+                    self.refresh_timer.start(int(mins * 60 * 1000))
+        except ValueError:
+            pass
+
+
+    def update_timer_interval2(self):
+        """Updates and restarts the timer whenever the refresh box changes."""
+        try:
+            val = self.edit_refresh.text().strip()
+            if not val: return
+            mins = float(val)
+            if mins > 0:
+                # QTimer uses milliseconds
+                self.refresh_timer.start(int(mins * 60 * 1000))
+        except ValueError:
+            pass
+
+    def run_auto_stats(self):
+        """Forces an immediate refresh and resets the timer."""
+        # Check if worker is already running to prevent overlapping
+        if hasattr(self, 'auto_worker') and self.auto_worker.isRunning():
+            return
+
+        if not self.server_data:
+            print("Debug: No server data found to refresh.")
+            return
+
+        # 1. Visual Feedback - This MUST happen first
+        self.btn_refresh_now.setEnabled(False)
+        self.btn_refresh_now.setText("...")
+        
+        # 2. Reset the timer interval
+        self.update_timer_interval()
+
+        # 3. Get parameters
+        try:
+            win_val = int(self.edit_window.text().strip())
+            clamped = max(1, min(60, win_val))
+            time_window_str = f"{clamped} minutes ago"
+        except:
+            time_window_str = "60 minutes ago"
+
+        mode = 'name' if self.rad_name.isChecked() else 'ip'
+
+        # 4. Initialize Worker
+        # IMPORTANT: Assign to self.auto_worker so it isn't deleted by Python
+        self.auto_worker = AutoStatsWorker(self.server_data, mode, time_window_str)
+        
+        # Connect signals
+        self.auto_worker.stats_ready.connect(self.update_stats_table)
+        self.auto_worker.finished.connect(self.on_worker_finished)
+        
+        # 5. Start
+        print(f"Debug: Starting manual refresh for {len(self.server_data)} servers...")
+        self.auto_worker.start()
+
+    def on_worker_finished(self):
+        """Restores the button state."""
+        self.btn_refresh_now.setText("↻")
+        self.btn_refresh_now.setEnabled(True)
+        print("Debug: Refresh complete.")
 
     def get_validated_inputs(self):
         """Helper to validate and return clients and bandwidth."""
