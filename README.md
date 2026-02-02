@@ -2,6 +2,17 @@
 
 This repository provides a suite of tools designed for users to deploy, monitor, and manage **Psiphon Conduit** on remote Linux servers.
 
+# 🛡️ Conduit Manager
+
+A cross-platform management suite for automated conduit deployment.
+
+[ ![Download ZIP](https://img.shields.io/badge/-%3C%3E%20Code%20(ZIP)-2ea44f?style=for-the-badge&logo=github&logoColor=white) ](https://github.com/Starling226/conduit-manager/archive/refs/heads/main.zip)
+
+> **Note:** For the most stable experience, click the green button above to download the repository, extract it, and run `ConduitQt.py`.
+# My Project
+1. **Download:** 🚀 Get Started: Click the button below to download the latest version as a ZIP file, or clone the repository directly.. 
+[ ![Download Code](https://img.shields.io/badge/-%3C%3E%20Code-2ea44f?style=for-the-badge&logo=github&logoColor=white) ](https://github.com/Starling226/conduit-manager/archive/refs/heads/main.zip)
+
 ## Download and Preparations
 1. **Python Instalation:** Please visist https://www.python.org/downloads/ and install the latest python
 

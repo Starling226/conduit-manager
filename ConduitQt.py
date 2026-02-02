@@ -14,10 +14,15 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QRadioButton, QButtonGroup, QDialog, QFormLayout, 
                              QTableWidgetItem, QTableWidget, QHeaderView)
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QRunnable, QThreadPool
 from PyQt5.QtGui import QFont
 from PyQt5.QtGui import QColor, QBrush
 from fabric import Connection, Config
+import pyqtgraph as pg
+from pyqtgraph import DateAxisItem
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
 
 # --- PLATFORM SPECIFIC FIXES ---
 if platform.system() == "Darwin":  # Darwin is the internal name for macOS
@@ -27,6 +32,113 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     print("[INFO] macOS High-DPI Scaling Enabled")
 
 CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+
+
+class LogFetcherSignals(QObject):
+    """Signals for individual thread status."""
+    finished = pyqtSignal(str) # Emits IP when done
+
+class LogFetcher(QRunnable):
+    def __init__(self, server, days):
+        super().__init__()
+        self.server = server
+        self.days = days
+        self.signals = LogFetcherSignals()
+
+    def run(self):
+        ip = self.server['ip']
+        try:
+            # 1. Fetch only relevant lines from journal
+#            cmd = f"journalctl -u conduit.service --since '{self.days} days ago' -o cat | grep -F '[STATS]'"
+            cmd = f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | grep '[STATS]'"
+            
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+            connect_kwargs = {"key_filename": [key_path], "timeout": 10}
+
+            with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
+                result = conn.run(cmd, hide=True)
+                output = result.stdout.strip()
+                if not output:
+                    return
+
+                lines = output.splitlines()
+
+                # 2. Regex to extract: Date, Clients, UP, DOWN
+                pattern = r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}).*?(?:Connected|Clients):\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
+                
+                log_path = f"server_logs/{ip}.log"
+                valid_lines = 0
+
+                with open(log_path, "w") as f:
+                    for line in lines:
+#                        print (line)
+#                           match = re.search(pattern, line)
+                        match = re.search(pattern, line)
+
+                        if match:
+                            dt_raw, clients, up_str, down_str = match.groups()
+#                                dt, clients, up, down = match.groups()
+                                
+                                # Standardize date for our Visualizer: Replace 'T' with space
+                            dt = dt_raw.replace('T', ' ')
+                            
+                            up_bytes = self.parse_to_bytes(up_str)
+                            down_bytes = self.parse_to_bytes(down_str)
+
+                                # Write 4 clean columns (Tab separated)
+                            f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
+                            valid_lines += 1
+                print(f"✅ {ip}: Written {valid_lines} lines to log.")
+                            
+        except Exception as e:
+            print(f"Failed regex fetch for {ip}: {e}")
+        finally:
+            self.signals.finished.emit(ip)
+
+    def parse_to_bytes(self, size_str):
+        """Helper to convert '10.5 GB' to raw integer bytes."""
+        units = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}
+        try:
+            number, unit = size_str.split()
+            return int(float(number) * units.get(unit.upper(), 1))
+        except:
+            return 0
+
+
+class HistoryWorker(QThread):
+    """Manages the pool of LogFetchers."""
+    all_finished = pyqtSignal()
+    progress = pyqtSignal(int) # Percentage of servers completed
+
+    def __init__(self, servers, days):
+        super().__init__()
+        self.servers = servers
+        self.days = days
+        self.completed_count = 0
+
+    def run(self):
+        if not os.path.exists("server_logs"):
+            os.makedirs("server_logs")
+
+        pool = QThreadPool.globalInstance()
+        # Set max threads to number of servers or a reasonable limit (e.g., 20)
+        pool.setMaxThreadCount(20) 
+
+        total = len(self.servers)
+        for s in self.servers:
+            fetcher = LogFetcher(s, self.days)
+            fetcher.signals.finished.connect(self.on_one_finished)
+            pool.start(fetcher)
+
+        # Wait for pool to finish
+        pool.waitForDone()
+        self.all_finished.emit()
+
+    def on_one_finished(self, ip):
+        self.completed_count += 1
+        percent = int((self.completed_count / len(self.servers)) * 100)
+        self.progress.emit(percent)
 
 class NumericTableWidgetItem(QTableWidgetItem):
     def __init__(self, text, sort_value):
@@ -140,8 +252,12 @@ class AutoStatsWorker(QThread):
 
                     if data_points:
                         res["success"] = True
+                        client_counts = [d['c'] for d in data_points if d['c'] > 0]
+                        if client_counts:
+                            avg_clients = sum(client_counts) / len(client_counts)
+
                         first, last = data_points[0], data_points[-1]
-                        avg_clients = sum(d['c'] for d in data_points) / len(data_points)
+
                         res["clients"] = str(int(round(avg_clients)))
                         res["up_val"] = self.format_bytes(max(0, last['u'] - first['u']))
                         res["down_val"] = self.format_bytes(max(0, last['d'] - first['d']))
@@ -150,68 +266,6 @@ class AutoStatsWorker(QThread):
                     
         except Exception:
             res["clients"] = "Offline"
-            
-        return res
-
-    def get_stats2(self, s):
-        display_label = s['name'] if self.display_mode == 'name' else s['ip']
-        res = {
-            "label": display_label, 
-            "ip": s['ip'],
-            "success": False, 
-            "clients": "0", 
-            "up_1h": "0 B", 
-            "down_1h": "0 B"
-        }
-        
-        try:
-            home = os.path.expanduser("~")
-            key_path = os.path.join(home, ".ssh", "id_conduit")
-            connect_kwargs = {
-                "key_filename": [key_path], 
-                "look_for_keys": False, 
-                "allow_agent": False, 
-                "timeout": 8
-            }
-
-            with Connection(host=s['ip'], user=s['user'], port=int(s['port']), connect_kwargs=connect_kwargs) as conn:
-                # Command to get last 1 hour of raw stats
-#                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
-                cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
-                result = conn.run(cmd, hide=True, timeout=12)
-                output = result.stdout.strip()
-
-                if output:
-                    lines = output.splitlines()
-                    pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)")
-                    
-                    data_points = []
-                    for line in lines:
-                        m = pattern.search(line)
-                        if m:
-                            data_points.append({
-                                'c': int(m.group(1)),
-                                'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
-                                'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}")
-                            })
-
-                    if data_points:
-                        res["success"] = True
-                        first = data_points[0]
-                        last = data_points[-1]
-
-                        # Calculate Average Clients (1h)
-                        avg_clients = sum(d['c'] for d in data_points) / len(data_points)
-                        res["clients"] = str(int(round(avg_clients)))
-
-                        # Hourly Growth (Delta)
-                        res["up_1h"] = self.format_bytes(max(0, last['u'] - first['u']))
-                        res["down_1h"] = self.format_bytes(max(0, last['d'] - first['d']))
-                else:
-                    res["clients"] = "No Data"
-
-        except Exception:
-            res["clients"] = "Error"
             
         return res
 
@@ -291,6 +345,26 @@ class ServerWorker(QThread):
                     else:
                         return c.run(cmd, hide=True, warn=True)
 
+                def get_conduit_stats():
+                    service_path = "/etc/systemd/system/conduit.service"
+    
+                    # This command searches the ExecStart line for the flags and returns just the values
+                    cmd = f"grep 'ExecStart' {service_path} | grep -oP '(?<=--max-clients )[0-9]+|(?<=--bandwidth )[0-9.]+'"
+    
+                    result = run_cmd(cmd)
+    
+                    if result and result.ok:
+                        # result.stdout will contain two lines: max-clients and bandwidth
+                        output = result.stdout.strip().split('\n')
+                        if len(output) >= 2:
+                            max_clients = output[0]
+                            bandwidth = output[1]
+#                            print(f"Current Config: {max_clients} Clients @ {bandwidth} Mbps")
+                            return f"max-clients: {max_clients} bandwidth: {bandwidth} Mbps"
+    
+                    print("Failed to parse conduit service file.")
+                    return f"max-clients: None bandwidth: None Mbps"
+
                 if self.action == "reset":
                     # 1. Stop the service
                     run_cmd("systemctl stop conduit")
@@ -320,7 +394,8 @@ class ServerWorker(QThread):
                     journal_logs = log_res.stdout if log_res.ok else "No logs found."
 
                     # 3. Combine them for the UI
-                    output = f"--- STATUS: {current_status} ---\n{journal_logs}"
+                    
+                    output = f"--- STATUS: {current_status} ---\n{get_conduit_stats()}\n{journal_logs}"
                     return output
 
                 service_file = "/etc/systemd/system/conduit.service"
@@ -696,10 +771,23 @@ WantedBy=multi-user.target
                 version_tag = CONDUIT_URL.split('/')[-2]
             except (NameError, IndexError):
                 version_tag = "Unknown"
-
+                        
             conn_params["key_filename"] = [key_path]
             conn_params["look_for_keys"] = False
-            conn_params["allow_agent"] = False
+            conn_params["allow_agent"] = False            
+            '''
+            pwd = s.get('pass') 
+            
+            if pwd:
+                conn_params["password"] = pwd
+                conn_params["look_for_keys"] = True
+                conn_params["allow_agent"] = False
+            else:
+                # Key-only mode
+                conn_params["key_filename"] = [key_path]
+                conn_params["look_for_keys"] = False
+                conn_params["allow_agent"] = False
+            '''
 
             with Connection(host=s['ip'], 
                             user=self.params['user'],
@@ -917,13 +1005,32 @@ class ConduitGUI(QMainWindow):
         layout.addLayout(lists_lay)
 
         ctrl_lay = QHBoxLayout()
-        self.btn_start = QPushButton("Start"); self.btn_stop = QPushButton("Stop")
-        self.btn_re = QPushButton("Re-Start"); self.btn_reset = QPushButton("Reset")
+        self.btn_start = QPushButton("Start"); 
+        self.btn_start.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+        
+        self.btn_re = QPushButton("Re-Start");        
+        self.btn_re.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
         self.btn_re.setToolTip("Use Restart if server is already running.")
-        self.btn_stat = QPushButton("Status"); self.btn_quit = QPushButton("Quit")
-        self.btn_reset.setToolTip("Use if clients not added after hours or server waiting to connect.")
+
+        self.btn_reset = QPushButton("Reset")
+        self.btn_reset.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+
+        self.btn_stat = QPushButton("Status");
+        self.btn_stat.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+
+        self.btn_quit = QPushButton("Quit")
+        self.btn_reset.setToolTip("Use if clients not added after hours or server waiting to connect.")        
+
         self.btn_stats = QPushButton("Statistics")
         self.btn_stats.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+
+        self.btn_visualize = QPushButton("Visualize")
+        self.btn_visualize.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
+        self.btn_visualize.clicked.connect(self.open_visualizer)
+        cfg_lay.addWidget(self.btn_visualize)
 
         self.btn_deploy = QPushButton("Deploy")
         self.btn_deploy.setStyleSheet("background-color: #e67e22; color: white; font-weight: bold;")            
@@ -934,7 +1041,8 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
         self.btn_upgrade.setToolTip("Upgrade the conduit to the version displayed in GUI.")      
 
-        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_quit]:
+#        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_quit]:
+        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_visualize]:            
             ctrl_lay.addWidget(b)
         layout.addLayout(ctrl_lay)
 
@@ -989,6 +1097,13 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade.clicked.connect(self.run_upgrade)
         
         self.update_timer_interval() # Initialize timer
+
+    def open_visualizer(self):
+        if not hasattr(self, 'viz_window'):
+            self.viz_window = VisualizerWindow(self.server_data)
+        self.viz_window.show()
+        # Trigger initial fetch for current day
+        self.viz_window.start_data_fetch()
 
     def parse_to_bytes(self, s):
         if not s or "0 B" in s or "-" in s: return 0.0
@@ -1104,19 +1219,6 @@ class ConduitGUI(QMainWindow):
         except ValueError:
             pass
 
-
-    def update_timer_interval2(self):
-        """Updates and restarts the timer whenever the refresh box changes."""
-        try:
-            val = self.edit_refresh.text().strip()
-            if not val: return
-            mins = float(val)
-            if mins > 0:
-                # QTimer uses milliseconds
-                self.refresh_timer.start(int(mins * 60 * 1000))
-        except ValueError:
-            pass
-
     def run_auto_stats(self):
         """Forces an immediate refresh and resets the timer."""
         # Check if worker is already running to prevent overlapping
@@ -1153,7 +1255,7 @@ class ConduitGUI(QMainWindow):
         self.auto_worker.finished.connect(self.on_worker_finished)
         
         # 5. Start
-        print(f"Debug: Starting manual refresh for {len(self.server_data)} servers...")
+        print(f"Starting manual refresh for {len(self.server_data)} servers...")
         self.auto_worker.start()
 
     def on_worker_finished(self):
@@ -1293,12 +1395,41 @@ class ConduitGUI(QMainWindow):
         
         self.deploy_thread.start()
 
+    def get_target_servers(self, warnin_flag):
+        """
+        Returns a list of server IPs based on input or table selection.
+        """
+
+        selected_targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
+    
+        if selected_targets:
+            # Split by comma or space and clean up
+            return selected_targets
+
+        # 2. If panel is empty, get highlighted rows from the table
+        selected_ips = []
+    
+        # We use selectedIndexes to identify unique rows
+        indexes = self.stats_table.selectionModel().selectedRows()
+    
+        selected_targets = []
+        for index in indexes:
+            row = index.row()            
+            ip_item = self.stats_table.item(row, 0) 
+            if ip_item:
+                for s in self.server_data:
+                    if s['ip'] == ip_item.text().strip():
+                        selected_targets.append(s)
+
+        if selected_targets and warnin_flag:
+            QMessageBox.warning(self, "Information", "You have selected servers from Status Tables")
+
+        return selected_targets
+
     def run_upgrade(self):
         # 1. Get targets
-        selected_targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
-        if not selected_targets:
-            QMessageBox.warning(self, "Deployment", "No servers selected.")
-            return
+
+        selected_targets = self.get_target_servers(True)
 
         validated = self.get_validated_inputs()
         if not validated: return 
@@ -1351,11 +1482,13 @@ class ConduitGUI(QMainWindow):
         self.deploy_thread.start()
 
     def run_stats(self):
+        targets = self.get_target_servers(False)
+        '''
         targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
         if not targets: 
             QMessageBox.warning(self, "Stats", "Add servers to the right-side list first.")
             return
-            
+        '''    
         # Check which radio button is active
         mode = 'name' if self.rad_name.isChecked() else 'ip'
         
@@ -1366,11 +1499,14 @@ class ConduitGUI(QMainWindow):
 
     def confirm_action(self, action):
         """Standard guard for Start, Stop, and Restart"""
-        count = self.sel.count()
+#        count = self.sel.count()
+        print('B')
+        targets = self.get_target_servers(True)
+        count = len(targets)
         if count == 0:
             QMessageBox.warning(self, "No Selection", "Please add servers to the 'Selected' list first.")
             return
-
+        print('C')
         # Personalize the message based on the action
         action_title = action.capitalize()
         if action == "restart":
@@ -1391,12 +1527,13 @@ class ConduitGUI(QMainWindow):
 
     def confirm_reset(self):
         """Safety check before performing a destructive reset"""
-        targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
+#        targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
         
+        targets = self.get_target_servers(True)
         if not targets:
             QMessageBox.warning(self, "Reset", "No servers selected in the right-side list.")
             return
-
+        
         msg = f"WARNING: This will stop the service and DELETE ALL DATA in /var/lib/conduit/ on {len(targets)} server(s).\n\nAre you absolutely sure?"
         reply = QMessageBox.critical(self, "Confirm Full Reset", msg, 
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -1508,6 +1645,7 @@ class ConduitGUI(QMainWindow):
                                 "pass": parts[4] if len(parts) > 4 else "" # Empty if 5th param missing
                             }
                             self.server_data.append(d)
+                            print(parts[0])
                             self.pool.addItem(self.create_item(d))
                 
                 self.pool.sortItems()
@@ -1600,6 +1738,7 @@ class ConduitGUI(QMainWindow):
         """
         Pulling targets based on the hidden UserRole IP key.
         """
+        '''
         targets = []
         for i in range(self.sel.count()):
             item = self.sel.item(i)
@@ -1607,6 +1746,9 @@ class ConduitGUI(QMainWindow):
             if server_dict:
                 targets.append(server_dict)
         
+        '''
+        targets = self.get_target_servers(False)
+
         if not targets: 
             QMessageBox.warning(self, "Action", "No servers in the Selected list.")
             return
@@ -1761,6 +1903,637 @@ class ConduitGUI(QMainWindow):
             self.console.appendPlainText(f"[SUCCESS] {len(self.server_data)} servers imported.")
         except Exception as e:
             self.console.appendPlainText(f"[ERROR] Could not read file: {e}")
+
+class VisualizerWindow(QMainWindow):
+    def __init__(self, server_list):
+        super().__init__()
+        self.setWindowTitle("Conduit Analytics Visualizer")
+        self.resize(1400, 850)
+        self.server_list = server_list
+        
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        
+        # Splitter allows user to resize the sidebar vs graph area
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # --- LEFT PANEL: IP List ---
+        self.ip_list = QListWidget()
+        self.ip_list.setFixedWidth(180)
+        # Populate IPs
+        for s in self.server_list:
+            self.ip_list.addItem(s['ip'])
+        
+        self.ip_list.setStyleSheet("""
+            QListWidget {
+                font-family: 'Consolas';
+                font-size: 14px;
+                background-color: #2b2b2b;
+                color: #ffffff;
+                border: 1px solid #555;
+            }
+            QListWidget::item {
+                height: 30px; /* Increases the row height */
+                padding-left: 10px;
+            }
+            QListWidget::item:selected {
+                background-color: #4a90e2;
+            }
+        """)
+
+        # CHANGE: Use currentItemChanged for Click/Arrow Key navigation
+        self.ip_list.currentItemChanged.connect(self.handle_selection_change)
+        splitter.addWidget(self.ip_list)
+        
+        # --- RIGHT PANEL: Canvas with 3 Plots ---
+        self.canvas = pg.GraphicsLayoutWidget()
+        self.canvas.setBackground('k') # Black background often looks sharper for data
+        
+        # Setup 3 Vertical Plots with Date Axes
+        self.p_clients = self.canvas.addPlot(row=0, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        self.p_up = self.canvas.addPlot(row=1, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        self.p_down = self.canvas.addPlot(row=2, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        
+        # Configure axes and titles
+        plot_configs = [
+            (self.p_clients, "Total Clients", "#00d2ff"),
+            (self.p_up, "Upload Traffic (Bytes)", "#3aeb34"),
+            (self.p_down, "Download Traffic (Bytes)", "#ff9f43")
+        ]
+        
+        for plot, title, color in plot_configs:
+            plot.setTitle(title, color=color, size="12pt")
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            plot.getAxis('bottom').setLabel("Time (MM:DD HH:MM)")
+            
+        splitter.addWidget(self.canvas)
+        main_layout.addWidget(splitter)
+        
+        # --- BOTTOM PANEL: Controls ---
+        bottom_frame = QFrame()
+        bottom_frame.setFixedHeight(50)
+        bottom_lay = QHBoxLayout(bottom_frame)
+        
+        bottom_lay.addWidget(QLabel("Log Window (days):"))
+        self.edit_days = QLineEdit("1")
+        self.edit_days.setFixedWidth(60)
+        bottom_lay.addWidget(self.edit_days)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedWidth(300)
+        self.progress_bar.setVisible(False)  # Hidden until "Reload" is clicked
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        bottom_lay.addWidget(self.progress_bar)
+
+        self.btn_reload = QPushButton("Reload to retrieve the data")
+        self.btn_reload.setFixedWidth(200)
+        self.btn_reload.clicked.connect(self.start_data_fetch)
+        bottom_lay.addWidget(self.btn_reload)
+        
+# --- PLOT MODE SELECTION (Radio Buttons) ---
+#        mode_group_box = QGroupBox("Plot Mode")
+#        mode_layout = QHBoxLayout()
+        
+        bottom_lay.addWidget(QLabel("Traffic Mode "))
+        self.radio_total = QRadioButton("Total")
+        self.radio_instant = QRadioButton("Interval")
+        self.radio_instant.setChecked(True) # Default to your current delta view
+        
+        # Group them to ensure mutual exclusivity
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.radio_total)
+        self.mode_group.addButton(self.radio_instant)
+        
+        bottom_lay.addWidget(self.radio_total)
+        bottom_lay.addWidget(self.radio_instant)
+
+        self.radio_total.setChecked(True)
+#        mode_group_box.setLayout(mode_layout)
+        
+        # Add to your existing bottom_lay
+#        bottom_lay.addWidget(mode_group_box)
+
+        # --- SIGNALS AND SLOTS ---
+        self.radio_total.clicked.connect(self.on_total_clicked)
+        self.radio_instant.clicked.connect(self.on_instant_clicked)
+
+        bottom_lay.addStretch()
+        main_layout.addWidget(bottom_frame)
+
+    def start_data_fetch(self):
+        """Starts the multi-threaded download."""
+        days = self.edit_days.text()
+        
+        # UI Feedback
+        self.btn_reload.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Initializing SSH...")
+
+        # Initialize and start the HistoryWorker
+        self.worker = HistoryWorker(self.server_list, days)
+        
+        # Connect the progress signal from HistoryWorker to the bar
+        self.worker.progress.connect(self.update_progress_ui)
+        self.worker.all_finished.connect(self.on_fetch_complete)
+        self.worker.start()
+
+    def update_progress_ui(self, value):
+        """Updates the bar and the text format."""
+        self.progress_bar.setValue(value)
+        self.progress_bar.setFormat(f"Downloading Logs: %p%")
+
+    def on_fetch_complete(self):
+        """Cleanup after download is finished."""
+        self.progress_bar.setVisible(False)
+        self.btn_reload.setEnabled(True)
+        
+        # Refresh the current selection if one is highlighted
+        if self.ip_list.currentItem():
+            self.update_graphs_cumulative(self.ip_list.currentItem().text())
+
+    def handle_selection_change(self, current, previous):
+        """Triggered by click or arrow keys."""
+        if current:
+            if self.radio_total.isChecked():
+                self.update_graphs_cumulative(current.text())
+            else:
+                self.update_graphs_instantaneous(current.text())
+
+    def on_total_clicked(self):
+        """Slot for the 'Total' radio button."""
+        # When clicked, refresh the graph with the current selection
+        if self.ip_list.currentItem():
+            self.update_graphs_cumulative(self.ip_list.currentItem().text())
+
+    def on_instant_clicked(self):
+        """Slot for the 'Instantaneous' radio button."""
+        # When clicked, refresh the graph with the current selection
+        if self.ip_list.currentItem():
+            self.update_graphs_instantaneous(self.ip_list.currentItem().text())
+
+    def update_graphs_avg_median(self, ip):
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): 
+            return
+
+        # --- DATA LOADING ---
+        raw_data = [] 
+        try:
+            with open(file_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) == 4:
+                        dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                        raw_data.append((dt_obj.timestamp(), int(parts[1]), int(parts[2]), int(parts[3])))
+        except Exception: return
+
+        if len(raw_data) < 3: return
+
+        MB = 1024 * 1024
+        
+        # --- STEP 1: Fast Delta Calculation ---
+        raw_ts = [d[0] for d in raw_data[1:]]
+        raw_cl = [d[1] for d in raw_data[1:]]
+        # Pre-calculating deltas for the median filter
+        u_deltas = [max(0, raw_data[i][2] - raw_data[i-1][2]) / MB for i in range(1, len(raw_data))]
+        d_deltas = [max(0, raw_data[i][3] - raw_data[i-1][3]) / MB for i in range(1, len(raw_data))]
+
+# --- THE 10x SPURIOUS RULE FILTER ---
+        def apply_spurious_filter_3(data):
+            size = len(data)
+            if size < 3: return data
+            res = [data[0]] 
+            
+            for i in range(1, size - 1):
+                prev, curr, next_pt = data[i-1], data[i], data[i+1]
+                
+                # Rule: Is 'curr' 10x larger than both neighbors?
+                # We use max(0.1, ...) to avoid division by zero errors
+                ratio_prev = curr / max(0.001, prev)
+                ratio_next = curr / max(0.001, next_pt)
+                
+                if ratio_prev > 10 and ratio_next > 10:
+                    # Spurious detected: Use median (middle value of sorted triplet)
+                    window = sorted([prev, curr, next_pt])
+                    res.append(window[1])
+                else:
+                    # Not a spurious peak: Keep the original value
+                    res.append(curr)
+                    
+            res.append(data[-1])
+            return res
+
+        # --- STEP 2: The fast_median logic ---
+        # Optimized for a 3-point window without sorting
+        def fast_median_3(data):
+            size = len(data)
+            if size < 3: return data
+            # Initialize with the first point
+            res = [data[0]] 
+            
+            # Manual 3-point median (avoids list allocation and sort overhead)
+            for i in range(1, size - 1):
+                a, b, c = data[i-1], data[i], data[i+1]
+                # Finding the middle value via min/max logic
+                median = max(min(a, b), min(max(a, b), c))
+                res.append(median)
+                
+            res.append(data[-1]) # Keep the last point
+            return res
+
+# Apply the rule to raw deltas before averaging
+#        clean_u = apply_spurious_filter_3(u_deltas)
+#        clean_d = apply_spurious_filter_3(d_deltas)
+
+        clean_u = fast_median_3(u_deltas)
+        clean_d = fast_median_3(d_deltas)
+
+        # --- STEP 3: Resample (1-Minute Mean) ---
+        res_t, res_c, res_u, res_d = [], [], [], []
+        current_min = int(raw_ts[0] // 60)
+        t_c, t_u, t_d = [], [], []
+        
+        for i in range(len(raw_ts)):
+            this_min = int(raw_ts[i] // 60)
+            if this_min == current_min:
+                t_c.append(raw_cl[i])
+                t_u.append(clean_u[i])
+                t_d.append(clean_d[i])
+            else:
+                # Store averaged result
+                res_t.append(current_min * 60)
+                res_c.append(sum(t_c)/len(t_c))
+                res_u.append(sum(t_u)/len(t_u))
+                res_d.append(sum(t_d)/len(t_d))
+                # Reset for next minute
+                current_min = this_min
+                t_c, t_u, t_d = [raw_cl[i]], [clean_u[i]], [clean_d[i]]
+        
+        # Cleanup final bucket
+        if t_c:
+            res_t.append(current_min * 60)
+            res_c.append(sum(t_c)/len(t_c))
+            res_u.append(sum(t_u)/len(t_u))
+            res_d.append(sum(t_d)/len(t_d))
+
+        # --- STEP 4: Render to Canvas ---
+        self.p_clients.plot(res_t, res_c, pen=pg.mkPen('#00d2ff', width=1.5), clear=True)
+        self.p_up.plot(res_t, res_u, pen=pg.mkPen('#3aeb34', width=1.5), clear=True)
+        self.p_down.plot(res_t, res_d, pen=pg.mkPen('#ff9f43', width=1.5), clear=True)
+
+    def update_graphs_slice(self, ip):
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): 
+            return
+
+        raw_data = [] # List of tuples: (timestamp, clients, up_bytes, down_bytes)
+        try:
+            with open(file_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) == 4:
+                        dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                        raw_data.append((dt_obj.timestamp(), int(parts[1]), int(parts[2]), int(parts[3])))
+        except Exception as e:
+            print(f"Read error: {e}")
+            return
+
+        if len(raw_data) < 3: return
+
+        MB = 1024 * 1024
+        
+        # --- STEP 1: Calculate Raw Deltas ---
+        # We extract raw per-second (or per-log) changes
+        raw_ts = [d[0] for d in raw_data[1:]]
+        raw_cl = [d[1] for d in raw_data[1:]]
+        raw_u  = [max(0, raw_data[i][2] - raw_data[i-1][2]) / MB for i in range(1, len(raw_data))]
+        raw_d  = [max(0, raw_data[i][3] - raw_data[i-1][3]) / MB for i in range(1, len(raw_data))]
+
+        # --- STEP 2: Median Filter (Raw Level) ---
+        # This removes 1-2 second "spikes" or "glitches" before they touch the average
+        def apply_median_3(data):
+            if len(data) < 3: return data
+            filt = [data[0]]
+            for i in range(1, len(data)-1):
+                # Sort 3 points and take the middle one
+                window = sorted([data[i-1], data[i], data[i+1]])
+                filt.append(window[1])
+            filt.append(data[-1])
+            return filt
+
+        clean_u = apply_median_3(raw_u)
+        clean_d = apply_median_3(raw_d)
+
+        # --- STEP 3: Resample to 1-Minute Averages ---
+        # Group the "cleaned" raw data into 1-minute buckets
+        res_t, res_c, res_u, res_d = [], [], [], []
+        
+        if raw_ts:
+            current_min = int(raw_ts[0] // 60)
+            t_c, t_u, t_d = [], [], []
+            
+            for i in range(len(raw_ts)):
+                this_min = int(raw_ts[i] // 60)
+                if this_min == current_min:
+                    t_c.append(raw_cl[i])
+                    t_u.append(clean_u[i])
+                    t_d.append(clean_d[i])
+                else:
+                    res_t.append(current_min * 60)
+                    res_c.append(sum(t_c)/len(t_c))
+                    res_u.append(sum(t_u)/len(t_u))
+                    res_d.append(sum(t_d)/len(t_d))
+                    current_min = this_min
+                    t_c, t_u, t_d = [raw_cl[i]], [clean_u[i]], [clean_d[i]]
+            
+            # Finalize last bucket
+            if t_c:
+                res_t.append(current_min * 60)
+                res_c.append(sum(t_c)/len(t_c))
+                res_u.append(sum(t_u)/len(t_u))
+                res_d.append(sum(t_d)/len(t_d))
+
+        # --- STEP 4: Plotting ---
+        self.p_clients.plot(res_t, res_c, pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        self.p_up.plot(res_t, res_u, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(res_t, res_d, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+        
+        self.p_up.setTitle("Upload Traffic (MB/min - Hybrid Filter)", color="#3aeb34")
+        self.p_down.setTitle("Download Traffic (MB/min - Hybrid Filter)", color="#ff9f43")
+
+    def update_graphs_1_min_avg_median(self, ip):
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): 
+            return
+
+        raw_data = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 4:
+                    try:
+                        dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                        raw_data.append((dt_obj.timestamp(), int(parts[1]), int(parts[2]), int(parts[3])))
+                    except ValueError:
+                        continue
+
+        if len(raw_data) < 2:
+            return
+
+        # 1. Calculate Deltas and Resample to 1-minute averages first
+        MB = 1024 * 1024
+        deltas = []
+        for i in range(1, len(raw_data)):
+            t = raw_data[i][0]
+            c = raw_data[i][1]
+            u_delta = max(0, raw_data[i][2] - raw_data[i-1][2]) / MB
+            d_delta = max(0, raw_data[i][3] - raw_data[i-1][3]) / MB
+            deltas.append({'t': t, 'c': c, 'u': u_delta, 'd': d_delta})
+
+        # Resampling logic (1-minute buckets)
+        res_t, res_c, res_u, res_d = [], [], [], []
+        if deltas:
+            current_min = int(deltas[0]['t'] // 60)
+            t_c, t_u, t_d = [], [], []
+            for d in deltas:
+                this_min = int(d['t'] // 60)
+                if this_min == current_min:
+                    t_c.append(d['c']); t_u.append(d['u']); t_d.append(d['d'])
+                else:
+                    res_t.append(current_min * 60)
+                    res_c.append(sum(t_c)/len(t_c))
+                    res_u.append(sum(t_u)/len(t_u))
+                    res_d.append(sum(t_d)/len(t_d))
+                    current_min = this_min
+                    t_c, t_u, t_d = [d['c']], [d['u']], [d['d']]
+
+        # 2. Apply 3-Point Median Filter to Up and Down
+        def apply_median_3(data):
+            if len(data) < 3: return data
+            filtered = [data[0]] # Keep first point
+            for i in range(1, len(data) - 1):
+                # Pick the middle value of the 3-point window
+                window = sorted([data[i-1], data[i], data[i+1]])
+                filtered.append(window[1]) 
+            filtered.append(data[-1]) # Keep last point
+            return filtered
+
+        filtered_u = apply_median_3(res_u)
+        filtered_d = apply_median_3(res_d)
+
+        # 3. Plotting
+        self.p_clients.plot(res_t, res_c, pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        
+        # Plot filtered traffic
+        self.p_up.plot(res_t, filtered_u, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(res_t, filtered_d, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+        
+        self.p_up.setTitle("Filtered Upload (MB/min - Median 3)", color="#3aeb34")
+        self.p_down.setTitle("Filtered Download (MB/min - Median 3)", color="#ff9f43")
+
+    def update_graphs_avg(self, ip):
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): 
+            return
+
+        raw_data = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 4:
+                    try:
+                        dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                        # (timestamp, clients, up_bytes, down_bytes)
+                        raw_data.append((dt_obj.timestamp(), int(parts[1]), int(parts[2]), int(parts[3])))
+                    except ValueError:
+                        continue
+
+        if len(raw_data) < 2:
+            return
+
+        # 1. Calculate Deltas first
+        MB = 1024 * 1024
+        deltas = []
+        for i in range(1, len(raw_data)):
+            t = raw_data[i][0]
+            c = raw_data[i][1]
+            u_delta = max(0, raw_data[i][2] - raw_data[i-1][2]) / MB
+            d_delta = max(0, raw_data[i][3] - raw_data[i-1][3]) / MB
+            deltas.append({'t': t, 'c': c, 'u': u_delta, 'd': d_delta})
+
+        # 2. Resample / Average per Minute
+        # We group by floor(timestamp / 60)
+        resampled_t, resampled_c, resampled_u, resampled_d = [], [], [], []
+        
+        if deltas:
+            current_min = int(deltas[0]['t'] // 60)
+            temp_c, temp_u, temp_d = [], [], []
+
+            for d in deltas:
+                this_min = int(d['t'] // 60)
+                
+                if this_min == current_min:
+                    temp_c.append(d['c'])
+                    temp_u.append(d['u'])
+                    temp_d.append(d['d'])
+                else:
+                    # Save average of the previous minute
+                    resampled_t.append(current_min * 60)
+                    resampled_c.append(sum(temp_c) / len(temp_c))
+                    resampled_u.append(sum(temp_u) / len(temp_u))
+                    resampled_d.append(sum(temp_d) / len(temp_d))
+                    
+                    # Start new minute
+                    current_min = this_min
+                    temp_c, temp_u, temp_d = [d['c']], [d['u']], [d['d']]
+            
+            # Don't forget the last pending minute
+            if temp_c:
+                resampled_t.append(current_min * 60)
+                resampled_c.append(sum(temp_c) / len(temp_c))
+                resampled_u.append(sum(temp_u) / len(temp_u))
+                resampled_d.append(sum(temp_d) / len(temp_d))
+
+        # 3. Update the Plot Canvases
+        self.p_clients.plot(resampled_t, resampled_c, pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        self.p_up.plot(resampled_t, resampled_u, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(resampled_t, resampled_d, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+        
+        # Add labels to make it clear it's averaged
+        self.p_up.setTitle("Avg Upload Activity (MB/min)", color="#3aeb34")
+        self.p_down.setTitle("Avg Download Activity (MB/min)", color="#ff9f43")
+
+    def update_graphs_instantaneous(self, ip):
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): 
+            return
+
+        raw_epochs, raw_clients, raw_ups, raw_downs = [], [], [], []
+        
+        # 1. Read the raw data
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 4:
+                    try:
+                        dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                        raw_epochs.append(dt_obj.timestamp())
+                        raw_clients.append(int(parts[1]))
+                        raw_ups.append(int(parts[2]))
+                        raw_downs.append(int(parts[3]))
+                    except ValueError:
+                        continue
+
+        if len(raw_epochs) < 2:
+            # Not enough data to calculate a difference
+            return
+
+        # 2. Calculate the "Deltas" (The change between points)
+        # We keep epochs and clients as they are, but transform UP/DOWN
+        diff_epochs = []
+        diff_ups = []
+        diff_downs = []
+        diff_ups_mb = []
+        diff_downs_mb = []
+        MB = 1024 * 1024
+        KB = 1024
+
+        for i in range(1, len(raw_epochs)):
+            # Time difference between steps (usually 60s or 300s)
+            time_delta = raw_epochs[i] - raw_epochs[i-1]
+            
+            # Ensure we don't have negative deltas (happens if server restarts/resets stats)
+            up_delta = max(0, raw_ups[i] - raw_ups[i-1])
+            down_delta = max(0, raw_downs[i] - raw_downs[i-1])
+            
+            diff_epochs.append(raw_epochs[i])
+            if (raw_epochs[i] - raw_epochs[i-1] > 0):
+                diff_ups_mb.append((up_delta / MB) / (raw_epochs[i] - raw_epochs[i-1]))
+                diff_downs_mb.append((down_delta / MB) / (raw_epochs[i] - raw_epochs[i-1]))
+            else:
+                diff_ups_mb.append((up_delta / MB))
+                diff_downs_mb.append((down_delta / MB))
+            
+
+#            diff_ups.append(up_delta)
+#            diff_downs.append(down_delta)
+
+        # 3. Update the Plot Canvases
+        # Plot 1: Clients (No delta needed, we want to see actual count)
+        self.p_clients.plot(raw_epochs, raw_clients, pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        
+        # Plot 2 & 3: Traffic Deltas (Shows speed/activity per interval)
+#        self.p_up.plot(diff_epochs, diff_ups, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+#        self.p_down.plot(diff_epochs, diff_downs, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+
+        self.p_up.plot(diff_epochs, diff_ups_mb, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(diff_epochs, diff_downs_mb, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+        
+        # Update Titles to reflect the change
+        self.p_up.setTitle("Upload Activity (MBytes per Interval)", color="#3aeb34")
+        self.p_down.setTitle("Download Activity (MBytes per Interval)", color="#ff9f43")
+
+    def update_graphs_cumulative(self, ip):
+        KB = 1024
+        MB = 1024 * 1024
+        GB = 1024 * 1024 * 1024
+        TB = 1024 * 1024 * 1024 * 1024
+        file_path = f"server_logs/{ip}.log"
+        if not os.path.exists(file_path): return
+
+        epochs, clients, ups, downs = [], [], [], []
+        
+        up_title = ""
+        down_title = ""
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 4:
+                    dt_obj = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                    epochs.append(dt_obj.timestamp())
+                    clients.append(int(parts[1]))
+
+                    up = int(parts[2])
+                    down = int(parts[3])
+
+                    if up < MB:
+                        up_numerator =  KB
+                        up_title = "KBytes"
+                    elif up >= MB and up < GB:
+                       up_numerator =  MB
+                       up_title = "MBytes"
+                    elif up >= GB and up < TB:
+                       up_numerator =  GB
+                       up_title = "GBytes"                   
+                    else:
+                        up_numerator =  TB
+                        up_title = "TBytes"
+
+                    if down < MB:
+                        down_numerator =  KB
+                        down_title = "KBytes"
+                    elif down >= MB and down < GB:
+                       down_numerator =  MB
+                       down_title = "MBytes"
+                    elif down >= GB and down < TB:
+                       down_numerator =  GB                       
+                       down_title = "GBytes"
+                    else:
+                        down_numerator =  TB
+                        down_title = "TBytes"
+
+                    ups.append(int(parts[2])/up_numerator)
+                    downs.append(int(parts[3])/down_numerator)
+
+        self.p_clients.plot(epochs, clients, pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        self.p_up.plot(epochs, ups, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(epochs, downs, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+        
+        self.p_up.setTitle(f"Upload Activity {up_title}", color="#3aeb34")
+        self.p_down.setTitle(f"Download Activity {down_title}", color="#ff9f43")        
 
 
 if __name__ == "__main__":
