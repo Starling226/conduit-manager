@@ -41,6 +41,7 @@ The `ConduitQt.py` application is a robust, multi-threaded, cross-platform manag
 * **Batch Operations**: The interface uses a "Targeting" system. Simply move servers to the **Right List (Target List)** to include them in an action.
     > **Note:** Every server in the Right List will be included in the requested operation (Deploy, Start, Stop, or Reset), regardless of whether it is currently highlighted.
 * **Real-time Monitoring**: The multi-threaded architecture ensures the UI remains responsive while performing heavy deployment tasks or fetching live statistics from multiple nodes simultaneously.
+* **Graphic Interface for Network Traffic Monitoring**: The graphic interface allows monitoring of servers inividually using the high peformance PyQtgraph library.
 * **Configuration Updates**: By enabling the **"Apply Config Changes"** checkbox, you can push new parameters (such as client limits or bandwidth caps) to your servers during a *Start* or *Restart* command.
 
 
@@ -154,6 +155,8 @@ Customization: To change the interval, edit CHECK_INTERVAL_SECONDS (line 14) in 
 * **Reset:** You can reset the Conduit config using this. In case if you have not received any client or you think you do not have more clients usually less than 50 for more than a day, you can reset the config. If after frew hours you have receieved any clients you can also reset the config.
 * **Display Name/IP:** Use this to siwtch the list to Server name or IP address.
 * **Max Clients:** As a rule of thumb, each core should support 50-60 clients. So if you have 4 cores you can set it to 225. This will possibly gives you up to 200 clients.
+* **Status Table:** If the selection list empty you can highlight IP addresses in Status Table and directly do oprtaions.
+* **Visualize:** Visualize allows you to monitor network traffic across the server.
 
 ## Important Notes
 * **SSH Port:** These scripts use the standard **SSH Port 22** for all connections.
