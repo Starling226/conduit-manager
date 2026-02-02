@@ -10,7 +10,7 @@ cd "$HOME" || exit
 # Step 2: Ensure pip is updated and install dependencies
 echo "[*] Updating pip and installing dependencies..."
 python3 -m pip install --upgrade pip
-python3 -m pip install fabric paramiko PyQt5
+python3 -m pip install fabric paramiko PyQt5 pyqtgraph
 
 # Step 3: Setup SSH directory and keys
 if [ ! -d ".ssh" ]; then

@@ -17,11 +17,8 @@ A cross-platform management suite for automated conduit deployment.
 
 2. **Create Directory:** Create a folder named `Conduit` in your `C:\` partition in Windows or /opt/conduit in Linux and macOS environments.
 3. **Download Scripts:** Save the following scripts into `C:\Conduit` or /opt/conduit:
-   * `deploy_conduit_single_server.py`
-   * `deploy_conduit_multi_server.py`
-   * `conduit_status.py`
-   * `conduit_manager.py`
    * `setup_conduit.bat`
+   * `setup_conduit.sh`
    * `ConduiQt.py`
    
 ## SSH Genetaion and Python Installation
@@ -63,7 +60,6 @@ While `ConduitQt.py` is the primary cross-platform tool, the repository includes
 | Component | Platform | Primary Use Case |
 | :--- | :--- | :--- |
 | **ConduitQt.py** | Cross-Platform | Full-featured visual management & bulk deployment. |
-| **Staandalone Scripts** | Windows | Lightweight, task-specific CLI operations for Windows. |
 
 ---
 
@@ -99,33 +95,20 @@ For batch deployment, create a file named ip.txt in the C:\Conduit folder. Add o
 
 ## Management
 
-The `conduit_manager_windows.py` script allows you to check status, stop, start, restart, or reset the service. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and likely get clients.
-   ```powershell
-   py conduit_manager_windows.py
-   ```
+The Start, Stop, Re-Start, Reset, Status, Upgrade, Deploy allows you to manage your servers efficiently. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and get clients.
 
 ### Using servers.txt
 For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory that you run any of the scripts. Default port is 22. Upon successfull deployment the ssh public key will be injected to the server and root password will be removed from servers.txt. You must add root server for deployment if you plan to deploy mutiple servers simultaneouly. If you plan to deploy single server through the GUI applcation you will be prompted to enter the root password. Any comunication with the server will be perfomred using the ssh keys after successfull deployment.
 
 **Format:**
-`name,hostname,port,username`
+`name,hostname,port,username`. Do not add this header to servers.txt.
 
 **Example:**
 `MyServer,123.45.67.89,22,root`
 
 ## Monitoring
 
-After installation, the Psiphon network requires time for vetting and propagation. This can take anywhere from a few minutes to several hours.
-
-To monitor your current server status, run:
-
-   ```powershell
-   py conduit_status_windows.py
-   ```
-
-Cycle: This script runs every hour by default.
-
-Customization: To change the interval, edit CHECK_INTERVAL_SECONDS (line 14) in conduit_status_windows.py. Do not set this lower than 300 seconds (5 minutes).
+After installation, the Psiphon network requires time for vetting and propagation. This can take anywhere from a few minutes to several hours. You can use Statistics, or watch the STatus Table fro real time monitoring. You can click on Visualize to see the network traffic for individual servers. The graphs are interactive, you can zoom, unzoom, move up and down, shift to right and left. Right click on graph to reset and export the graph.
 
 ---
 
