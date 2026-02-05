@@ -35,11 +35,61 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     print("[INFO] macOS High-DPI Scaling Enabled")
 
 CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
     finished = pyqtSignal(str) # Emits IP when done
+
+class ReportFetcher(QRunnable):
+    def __init__(self, server):
+        super().__init__()
+        self.server = server
+        # Reuse the existing signal class
+        self.signals = LogFetcherSignals()
+
+    def run(self):
+        ip = self.server['ip']
+        try:
+            current_year = datetime.now().year
+            remote_path = f"/opt/conduit/{current_year}-conduit.log"
+            
+            # Simple stream and compress
+            cmd = f"cat {remote_path} | gzip -c"
+
+            text_buffer = io.StringIO()
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+
+            connect_kwargs = {
+                "key_filename": [key_path], 
+                "timeout": 10,
+                "look_for_keys": False, 
+                "allow_agent": False  
+            }
+
+            with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
+                conn.run(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
+                
+                compressed_bytes = text_buffer.getvalue().encode('latin-1')
+                
+                if not compressed_bytes:
+                    print(f"FAILED: No data in {remote_path} for {ip}")
+                    return
+
+                raw_bytes = gzip.decompress(compressed_bytes)
+                decoded_text = raw_bytes.decode('utf-8')
+
+                os.makedirs("server_report_logs", exist_ok=True)
+                # Saving as .raw so the Visualizer knows it needs processing
+                with open(f"server_report_logs/{ip}.raw", "w") as f:
+                    f.write(decoded_text)
+                            
+        except Exception as e:
+            print(f"CRITICAL ERROR for {ip}: {e}")
+        finally:
+            # Emitting the finished signal regardless of success/failure
+            self.signals.finished.emit(ip)
 
 class LogFetcher(QRunnable):
     def __init__(self, server, days):
@@ -123,6 +173,40 @@ class HistoryWorker(QThread):
         total = len(self.servers)
         for s in self.servers:
             fetcher = LogFetcher(s, self.days)
+#            fetcher.signals.finished.connect(self.on_one_finished)
+            pool.start(fetcher)
+
+        # Wait for pool to finish
+        pool.waitForDone()
+        self.all_finished.emit()
+
+    def on_one_finished(self, ip):
+        self.completed_count += 1
+        percent = int((self.completed_count / len(self.servers)) * 100)
+        self.progress.emit(percent)
+
+class ReportWorker(QThread):
+    """Manages the pool of LogFetchers."""
+    all_finished = pyqtSignal()
+    progress = pyqtSignal(int) # Percentage of servers completed
+
+    def __init__(self, servers):
+        super().__init__()
+        self.servers = servers
+
+#        self.completed_count = 0
+
+    def run(self):
+        if not os.path.exists("server_logs"):
+            os.makedirs("server_logs")
+
+        pool = QThreadPool.globalInstance()
+        # Set max threads to number of servers or a reasonable limit (e.g., 20)
+        pool.setMaxThreadCount(5)
+
+        total = len(self.servers)
+        for s in self.servers:
+            fetcher = ReportFetcher(s)
 #            fetcher.signals.finished.connect(self.on_one_finished)
             pool.start(fetcher)
 
@@ -499,15 +583,6 @@ class StatsWorker(QThread):
             
         return res
 
-    def format_bytes2(self, size):
-        """Helper to convert bytes back to human readable string"""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024.0:
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} PB"
-
-
     def uptime_to_seconds(self, uptime_str):
         try:
             # Handle formats like 6h55m19s
@@ -744,6 +819,17 @@ WantedBy=multi-user.target
                 conn.run("systemctl enable conduit", hide=True)
                 conn.run("systemctl start conduit", hide=True)
                 
+                # 6. Download Stats Script from GitHub
+                # We use the 'raw' GitHub URL to get the actual code, not the HTML page
+                stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
+                conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
+                conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+
+                # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
+                cron_cmd = "0 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                # This command checks if the job exists; if not, it adds it to the crontab
+                conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
+
                 if pwd:
                     self.remove_password_signal.emit(s['ip'])
 
@@ -771,7 +857,7 @@ WantedBy=multi-user.target
             conn_params["key_filename"] = [key_path]
             conn_params["look_for_keys"] = False
             conn_params["allow_agent"] = False            
-            '''
+            
             pwd = s.get('pass') 
             
             if pwd:
@@ -783,7 +869,7 @@ WantedBy=multi-user.target
                 conn_params["key_filename"] = [key_path]
                 conn_params["look_for_keys"] = False
                 conn_params["allow_agent"] = False
-            '''
+            
 
             with Connection(host=s['ip'], 
                             user=self.params['user'],
@@ -797,7 +883,8 @@ WantedBy=multi-user.target
                 res = conn.run("id -u", hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
-
+                
+                
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
                 v_check = conn.run("/opt/conduit/conduit --version", hide=True, warn=True)
@@ -809,7 +896,6 @@ WantedBy=multi-user.target
                     if current_version == version_tag:
                         return f"[SKIP] {s['ip']} is already running the latest version ({version_tag})."
                 # --------------------------------
-
 
                 # 2. Cleanup & Stop (Only runs if version is different or binary missing)
                 self.log_signal.emit(f"[{s['ip']}] Upgrading {current_version} -> {version_tag}...")
@@ -824,6 +910,15 @@ WantedBy=multi-user.target
 
                 # 5. Start
                 conn.run("systemctl start conduit", hide=True)                
+                
+                stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
+                conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
+                conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+
+                # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
+                cron_cmd = "0 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                # This command checks if the job exists; if not, it adds it to the crontab
+                conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
                 return f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}."
         except Exception as e:
@@ -1031,7 +1126,12 @@ class ConduitGUI(QMainWindow):
         self.btn_stats = QPushButton("Statistics")
         self.btn_stats.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
 
-        self.btn_visualize = QPushButton("Visualize")
+        self.btn_report = QPushButton("Report")
+        self.btn_report.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        self.btn_report.clicked.connect(self.open_report)
+        cfg_lay.addWidget(self.btn_report)
+
+        self.btn_visualize = QPushButton("Traffic")
         self.btn_visualize.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
         self.btn_visualize.clicked.connect(self.open_visualizer)
         cfg_lay.addWidget(self.btn_visualize)
@@ -1046,7 +1146,7 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade.setToolTip("Upgrade the conduit to the version displayed in GUI.")      
 
 #        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_quit]:
-        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_visualize]:            
+        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_visualize, self.btn_report]:            
             ctrl_lay.addWidget(b)
         layout.addLayout(ctrl_lay)
 
@@ -1101,6 +1201,14 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade.clicked.connect(self.run_upgrade)
         
         self.update_timer_interval() # Initialize timer
+
+    def open_report(self):
+        if not hasattr(self, 'rep_window'):
+            self.report_window = VisualizerReportWindow(self.server_data, self.console)
+        self.report_window.show()
+        # Trigger initial fetch for current day
+#        self.viz_window.start_data_fetch()
+
 
     def open_visualizer(self):
         if not hasattr(self, 'viz_window'):
@@ -2033,10 +2141,6 @@ class VisualizerWindow(QMainWindow):
         # Add to your existing bottom_lay
 #        bottom_lay.addWidget(mode_group_box)
 
-        # --- SIGNALS AND SLOTS ---
-#        self.radio_total.clicked.connect(self.on_total_clicked)
-#        self.radio_instant.clicked.connect(self.on_instant_clicked)
-
         self.radio_total.clicked.connect(self.refresh_current_plot)
 
         self.radio_instant.clicked.connect(self.refresh_current_plot)
@@ -2117,29 +2221,6 @@ class VisualizerWindow(QMainWindow):
                     last_ts = datetime.fromtimestamp(data['epochs'][-1]).strftime("%Y-%m-%d %H:%M:%S")
                     self.status_label.setText(f"Last Sync: {last_ts}")
                     self.set_status_color("red")            
-
-    def check_local_data_on_startup2(self):
-        """Triggers the initial plot from memory."""
-        if self.server_list and self.ip_list.count() > 0:
-            self.ip_list.setCurrentRow(0) # Triggers handle_selection_change
-
-    def check_local_data_on_startupFile(self):
-        """Populates the UI using local disk logs only."""
-        if self.server_list and self.ip_list.count() > 0:
-            first_ip = self.server_list[0]['ip']
-            
-            if os.path.exists(f"server_logs/{first_ip}.log"):
-                last_time = self.get_last_log_time(first_ip)
-                self.status_label.setText(f"Last Sync: {last_time}")
-                self.set_status_color("red") # Ensure RED
-                
-                # This triggers handle_selection_change
-#                self.ip_list.setCurrentRow(0)
-#                print(f"server_logs/{first_ip}.log exist on disk")
-            else:
-#                print(f"server_logs/{first_ip}.log does not exist on disk. Starts fetching the data")
-                self.status_label.setText("Last Sync: No Local Logs Found")
-                self.set_status_color("red")
 
     def start_data_fetch(self):
         """User manually clicked 'Reload'. NOW we start the SSH download."""
@@ -2274,24 +2355,6 @@ class VisualizerWindow(QMainWindow):
                 self.plot_cumulative(data_obj, ip)
             else:
                 self.plot_instantaneous(data_obj)
-
-    def on_total_clicked(self):
-        """Slot for the 'Total' radio button."""
-        current_item = self.ip_list.currentItem()
-        if current_item:
-            ip = current_item.text()
-            # GET the dictionary from cache, don't just pass the string 'ip'
-            if ip in self.data_cache:
-                self.plot_cumulative(self.data_cache[ip],ip)
-
-    def on_instant_clicked(self):
-        """Slot for the 'Interval' radio button."""
-        current_item = self.ip_list.currentItem()
-        if current_item:
-            ip = current_item.text()
-            # GET the dictionary from cache
-            if ip in self.data_cache:
-                self.plot_instantaneous(self.data_cache[ip])
 
     def get_dynamic_scale(self, max_value):
         KB = 1024
@@ -2589,27 +2652,495 @@ class VisualizerWindow(QMainWindow):
             print(f"Error parsing {file_path}: {e}")
             return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
 
-    def load_local_data(self, ip):
-        """Reads logs from disk, updates the timestamp label (RED), and plots."""
-        file_path = f"server_logs/{ip}.log"
+class VisualizerReportWindow(QMainWindow):
+    def __init__(self, server_list, console):
+        super().__init__()
+        self.setWindowTitle("Conduit Analytics Report")
+        self.resize(1400, 850)
+        self.server_list = server_list
+        self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
+        self.console = console
         
-        if os.path.exists(file_path):
-            # 1. Update the timestamp from the file
-            last_time = self.get_last_log_time(ip)
-            if last_time:
-                self.status_label.setText(f"Last Sync: {last_time}")
-                # Only set to red if we aren't currently in a 'Reload' sync
+        self.allow_network = False # Flag to block any automatic network activity
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        
+        # Splitter allows user to resize the sidebar vs graph area
+        splitter = QSplitter(Qt.Horizontal)
+        self._is_initializing = True
+        # --- LEFT PANEL: IP List ---
+        self.ip_list = QListWidget()
+        self.ip_list.setFixedWidth(180)
+        # Populate IPs
+        for s in self.server_list:
+            self.ip_list.addItem(s['ip'])
+        
+        self.ip_list.setStyleSheet("""
+            QListWidget {
+                font-family: 'Consolas';
+                font-size: 14px;
+                background-color: #2b2b2b;
+                color: #ffffff;
+                border: 1px solid #555;
+            }
+            QListWidget::item {
+                height: 30px; /* Increases the row height */
+                padding-left: 10px;
+            }
+            QListWidget::item:selected {
+                background-color: #4a90e2;
+            }
+        """)
+
+        # CHANGE: Use currentItemChanged for Click/Arrow Key navigation
+#        self.ip_list.currentItemChanged.connect(self.handle_selection_change)
+
+        splitter.addWidget(self.ip_list)
+        
+        # --- RIGHT PANEL: Canvas with 3 Plots ---
+        self.canvas = pg.GraphicsLayoutWidget()
+        self.canvas.setBackground('k') # Black background often looks sharper for data
+        
+        # Setup 3 Vertical Plots with Date Axes
+        self.p_clients = self.canvas.addPlot(row=0, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        self.p_up = self.canvas.addPlot(row=1, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        self.p_down = self.canvas.addPlot(row=2, col=0, axisItems={'bottom': DateAxisItem(orientation='bottom')})
+        
+        # Configure axes and titles
+        plot_configs = [
+            (self.p_clients, "Total Clients", "#00d2ff"),
+            (self.p_up, "Upload Traffic (Bytes)", "#3aeb34"),
+            (self.p_down, "Download Traffic (Bytes)", "#ff9f43")
+        ]
+        
+        for plot, title, color in plot_configs:
+            plot.setTitle(title, color=color, size="12pt")
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            plot.getAxis('bottom').setLabel("Time (MM:DD HH:MM)")
+            
+        splitter.addWidget(self.canvas)
+        main_layout.addWidget(splitter)
+        
+        # --- BOTTOM PANEL: Controls ---
+        bottom_frame = QFrame()
+        bottom_frame.setFixedHeight(50)
+        bottom_lay = QHBoxLayout(bottom_frame)
+                       
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedWidth(300)
+        self.progress_bar.setVisible(False)  # Hidden until "Reload" is clicked
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAlignment(Qt.AlignCenter)
+        bottom_lay.addWidget(self.progress_bar)
+        
+
+        self.btn_reload = QPushButton("Reload to retrieve the data")
+        self.btn_reload.setFixedWidth(200)
+        self.btn_reload.clicked.connect(self.start_data_fetch)
+        bottom_lay.addWidget(self.btn_reload)
+        
+
+#        self.radio_total.clicked.connect(self.refresh_current_plot)
+
+#        self.radio_instant.clicked.connect(self.refresh_current_plot)
+
+        self.status_label = QLabel("Last Sync: Never")
+        # Use Consolas for that "Conduit Version" terminal look
+        self.status_label.setFont(QFont("Consolas", 10, QFont.Bold))
+        self.set_status_color("red")
+
+
+        bottom_lay.addStretch()
+        bottom_lay.addWidget(self.status_label)
+
+        main_layout.addWidget(bottom_frame)
+        self.p_up.setXLink(self.p_clients)
+        self.p_down.setXLink(self.p_clients)
+
+        self.data_cache = {} # The central memory store
+
+        self.load_all_logs_into_memory()
+        self.console.appendPlainText(f"Importing data finished.")        
+        self.ip_list.currentItemChanged.connect(self.refresh_current_plot)
+        self.check_local_data_on_startup()        
+        self._is_initializing = False     
+
+    def set_status_color(self, color_name):
+        """Sets the status label color (red for old, dark gray/white for fresh)."""
+        color_map = {
+            "red": "#ff4d4d",
+            "dark": "#888888" # Professional dark gray for updated state
+        }
+        hex_color = color_map.get(color_name, "#ffffff")
+        self.status_label.setStyleSheet(f"color: {hex_color};")
+
+    def get_last_log_time(self, ip):
+        """Reads the very last line of a local log file to get the timestamp."""
+        file_path = f"server_report_logs/{ip}.log"
+        if not os.path.exists(file_path):
+            return None
+        try:
+            with open(file_path, 'rb') as f:
+                f.seek(-2, os.SEEK_END)
+                while f.read(1) != b'\n':
+                    f.seek(-2, os.SEEK_CUR)
+                last_line = f.readline().decode()
+                return last_line.split('\t')[0] # Returns "YYYY-MM-DD HH:MM:SS"
+        except Exception:
+            return None
+
+    def check_local_data_on_startup(self):
+        """Ensures the first server is actually rendered on window open."""
+        if self.ip_list.count() > 0:
+            # 1. Highlight the first item
+            self.ip_list.setCurrentRow(0)
+            
+            # 2. Force the window to 'calculate' its layout and sizes
+            # This prevents the "blank graph" issue
+            QApplication.processEvents() 
+
+            # 3. Get the first IP and its cached data
+            ip = self.ip_list.item(0).text()
+            if ip in self.data_cache:
+                data = self.data_cache[ip]
+                
+                # 4. Explicitly call the plot based on radio state
+
+                self.plot_cumulative(data, ip)
+                
+                # 6. Force the axes to find the data points
+                self.p_clients.enableAutoRange()
+                self.p_up.enableAutoRange()
+                self.p_down.enableAutoRange()
+
+                # 5. Update the Sync Label for the first time
+                if data['epochs']:
+                    last_ts = datetime.fromtimestamp(data['epochs'][-1]).strftime("%Y-%m-%d %H:%M:%S")
+                    self.status_label.setText(f"Last Sync: {last_ts}")
+                    self.set_status_color("red")            
+
+    def start_data_fetch(self):
+        """User manually clicked 'Reload'. NOW we start the SSH download."""
+        self.allow_network = True  # Enable network mode
+        self.set_status_color("dark") # Change color to dark as requested
+        
+        self.btn_reload.setEnabled(False)
+#        self.progress_bar.setVisible(True)
+#        self.progress_bar.setValue(0)
+#        self.progress_bar.setFormat(f"Downloading")
+        self.status_label.setText("Retrieving data started...")
+        # This is where the actual 'Downloading' happens
+        self.worker = ReportWorker(self.server_list)
+        self.worker.progress.connect(self.update_progress_ui)
+        self.worker.all_finished.connect(self.on_fetch_complete)
+        self.worker.start()
+
+    def update_progress_ui(self, value):
+        """Updates the bar and the text format."""
+        self.progress_bar.setValue(value)
+        self.progress_bar.setFormat(f"Downloading Logs: %p%")
+
+
+    def parse_to_bytes(self, size_str):
+        """Helper to convert '10.5 GB' to raw integer bytes."""
+        units = {"B": 1, "KB": 1024, "MB": 1024*1024, "GB": 1024*1024*1024, "TB": 1024*1024*1024*1024}
+        try:
+            number, unit = size_str.split()
+            return int(float(number) * units.get(unit.upper(), 1))
+        except:
+            return 0
+
+    def process_raw_file(self, ip):
+        """
+        Takes the raw journalctl output and converts it to a clean tab-separated log.
+        This runs on the local machine after all downloads are finished.
+        """
+        raw_path = f"server_report_logs/{ip}.raw"
+        log_path = f"server_report_logs/{ip}.log"
+    
+        if not os.path.exists(raw_path):
+            return
+
+        # 1. Regex to extract: Date, Clients, UP, DOWN
+
+        pattern = r"^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}),\s*(\d+),\s*(\d+),\s*(\d+)"
+    
+        valid_lines = 0
+        try:
+            with open(raw_path, "r") as r, open(log_path, "w") as f:
+                for line in r:
+                    match = re.search(pattern, line)
+                    if match:
+                        dt_raw, clients, up_str, down_str = match.groups()
+                    
+                        # 2. Format data
+                        dt = dt_raw.replace('T', ' ')
+                        up_bytes = self.parse_to_bytes(up_str)
+                        down_bytes = self.parse_to_bytes(down_str)
+                    
+                        # 3. Write standardized columns
+                        f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
+                        valid_lines += 1
+        
+            # Optional: Remove the raw file to save space after processing
+            os.remove(raw_path)
+            print(f"✅ {ip}: Processed {valid_lines} lines.")
+        
+        except Exception as e:
+            print(f"❌ Error processing raw data for {ip}: {e}")
+
+    def on_fetch_complete(self):
+        """Called when ReportWorker (the network threads) finishes."""
+        self.status_label.setText("Processing Raw Logs...")
+
+        # 1. Convert all RAW files to clean LOG files
+        for server in self.server_list:
+            self.process_raw_file(server['ip'])
+
+        # 2. Load the newly cleaned data into the Memory Cache
+        self.status_label.setText("Importing data...")
+        self.load_all_logs_into_memory()
+        self.console.appendPlainText(f"Importing data finished.")
+        # 3. Refresh the GUI
+        self.progress_bar.setVisible(False)
+        self.btn_reload.setEnabled(True)
+        if self.ip_list.currentItem():
+            self.handle_selection_change(self.ip_list.currentItem(), None)
+    
+        self.status_label.setText("Sync Complete")
+
+    def handle_selection_change(self, current, previous):
+        """Switching is now instantaneous because it uses self.data_cache."""
+        if not current: return
+        ip = current.text()
+        
+        # Check if the IP exists in our memory cache
+        if ip in self.data_cache:
+            data_obj = self.data_cache[ip] # This is the dictionary
+            
+            # 1. Update Timestamp Label
+            if data_obj['epochs']:
+                last_ts = datetime.fromtimestamp(data_obj['epochs'][-1]).strftime("%Y-%m-%d %H:%M:%S")
+                self.status_label.setText(f"Last Sync: {last_ts}")
+                
+                # Logic for color: Red if idle, Dark if reloading
                 if not self.progress_bar.isVisible():
                     self.set_status_color("red")
-            
-            # 2. Call your existing plotting methods (which read the file)
-            if self.radio_total.isChecked():
-                self.plot_cumulative(ip)
-            else:
-                self.plot_instantaneous(ip)
+                else:
+                    self.set_status_color("dark")
+
+            # 2. PASS THE DICTIONARY, NOT THE IP STRING
+
+            self.plot_cumulative(data_obj, ip)   # Pass the object {}
+
         else:
-            self.status_label.setText("Status: No local logs found.")
-            self.set_status_color("red")
+            self.status_label.setText("Last Sync: No Data in Cache")
+
+    def refresh_current_plot(self):
+        """One function to rule them all. Call this whenever any UI setting changes."""
+        current_item = self.ip_list.currentItem()
+        if not current_item:
+            return
+            
+        ip = current_item.text()
+        if ip in self.data_cache:
+            data_obj = self.data_cache[ip]
+                        
+            self.plot_cumulative(data_obj, ip)
+
+    def get_dynamic_scale(self, max_value):
+        KB = 1024
+        MB = 1024 ** 2
+        GB = 1024 ** 3
+        TB = 1024 ** 4
+
+        if max_value < KB:
+            return 1, "Bytes"
+        elif max_value < MB:
+            return KB, "KB"
+        elif max_value < GB:
+            return MB, "MB"
+        elif max_value < TB:
+            return GB, "GB"
+        else:
+            return TB, "TB"
+
+    def plot_cumulative(self, data, ip):
+        """Plots total usage using cached memory data with dynamic units."""
+        # 1. Always clear first to ensure we don't overlay data
+        self.p_clients.clear()
+        self.p_up.clear()
+        self.p_down.clear()
+
+        epochs = data.get('epochs', [])
+        
+        # 2. Check for insufficient data
+        if len(epochs) < 2:
+            self.p_up.setTitle("Up (No Data)")
+            self.p_down.setTitle("Down (No Data)")
+            # Re-enable auto-range so it's ready for the next valid click
+            for p in [self.p_clients, self.p_up, self.p_down]:
+                p.enableAutoRange()
+            return
+        
+        # 1. Determine the scale based on the highest value in either Up or Down
+        max_up = data['ups'][-1] if data['ups'] else 0
+        max_down = data['downs'][-1] if data['downs'] else 0
+        max_val = max(max_up, max_down)
+
+        # 2. Apply your specific rules
+        KB = 1024
+        MB = 1024 * 1024
+        GB = 1024 * 1024 * 1024
+        TB = 1024 * 1024 * 1024 * 1024
+
+        if max_val >= KB and max_val < MB:
+            divisor, unit = KB, "KBytes"
+        elif max_val >= MB and max_val < GB:
+            divisor, unit = MB, "MBytes"
+        elif max_val >= GB and max_val < TB:
+            divisor, unit = GB, "GBytes"
+        elif max_val >= TB:
+            divisor, unit = TB, "TBytes"
+        else:
+            divisor, unit = 1, "Bytes"
+
+        # 3. Scale the data arrays
+        scaled_ups = [x / divisor for x in data['ups']]
+        scaled_downs = [x / divisor for x in data['downs']]
+
+        # 4. Plot scaled data
+        self.p_clients.plot(data['epochs'], data['clients'], pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        self.p_up.plot(data['epochs'], scaled_ups, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(data['epochs'], scaled_downs, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+
+        # 5. Update Titles/Labels to show the unit
+        if ip != "---.---.---.---":
+            self.p_clients.setTitle(f"Total Clients")
+            self.p_up.setTitle(f"Total Up ({unit})")            
+            self.p_down.setTitle(f"Total Down ({unit})")
+        else:
+            self.p_up.setTitle(f"Total Up - all servers ({unit})")
+            self.p_down.setTitle(f"Total Down - all servers ({unit})")
+            self.p_clients.setTitle(f"Total Clients - all servers")
+
+        for p in [self.p_clients, self.p_up, self.p_down]: 
+            p.enableAutoRange(axis='y')      
+
+    def load_all_logs_into_memory(self):
+        """Reads logs and creates a Global Total with reboot-resilient summing."""
+
+        existing_items = self.ip_list.findItems("---.---.---.---", Qt.MatchExactly)
+
+        # If it exists, remove it
+        if existing_items:
+            for item in existing_items:
+                row = self.ip_list.row(item)
+                self.ip_list.takeItem(row)
+
+        self.data_cache.clear()
+        server_list = sorted(self.server_list, key=lambda x: x['ip'])
+        
+        all_epochs = []
+        for server in server_list:
+            ip = server['ip']
+            file_path = f"server_report_logs/{ip}.log"
+            if os.path.exists(file_path):
+                print(f"Reading: {ip}")
+                data = self.parse_log_file(file_path)
+                self.data_cache[ip] = data
+                if data['epochs']:
+                    all_epochs.extend([data['epochs'][0], data['epochs'][-1]])
+
+        if not all_epochs:
+            return
+
+        # --- SETUP FOR GLOBAL SUMMING ---
+        start_t = int(min(all_epochs))
+        end_t = int(max(all_epochs))
+        
+        server_ips = list(self.data_cache.keys())
+        cursors = {ip: 0 for ip in server_ips}
+        
+        # Track offsets specifically for the Global Total calculation
+        # This prevents 'reboot drops' from affecting the 255.255.255.255 data.
+        up_offsets = {ip: 0 for ip in server_ips}
+        down_offsets = {ip: 0 for ip in server_ips}
+        
+        total_epochs, total_clients, total_ups, total_downs = [], [], [], []
+
+        # 3. Resample: Iterate every second
+        for current_t in range(start_t, end_t + 1):
+            s_clients = 0
+            s_ups = 0
+            s_downs = 0
+
+            for ip in server_ips:
+                data = self.data_cache[ip]
+                idx = cursors[ip]
+                
+                # Check for counter reset BEFORE moving to the next point. This happen when a server restart.
+                if idx + 1 < len(data['epochs']) and data['epochs'][idx + 1] <= current_t:
+                    # Look ahead: if next value is lower than current, it's a reboot
+                    if data['ups'][idx + 1] < data['ups'][idx]:
+                        up_offsets[ip] += data['ups'][idx]
+                        print(f"📈 [Totalizer] Up-Reset detected on {ip} at {current_t}")
+                    
+                    if data['downs'][idx + 1] < data['downs'][idx]:
+                        down_offsets[ip] += data['downs'][idx]
+                        print(f"📈 [Totalizer] Down-Reset detected on {ip} at {current_t}")
+
+                    # Now safely move the cursor forward
+                    while idx + 1 < len(data['epochs']) and data['epochs'][idx + 1] <= current_t:
+                        idx += 1
+                    cursors[ip] = idx
+                
+                # Sum the value + any accumulated offsets for this server
+                s_clients += data['clients'][idx]
+                s_ups     += (data['ups'][idx] + up_offsets[ip])
+                s_downs   += (data['downs'][idx] + down_offsets[ip])
+
+            total_epochs.append(float(current_t))
+            total_clients.append(s_clients)
+            total_ups.append(s_ups)
+            total_downs.append(s_downs)
+
+        # 5. Assign to virtual IP
+        self.data_cache["---.---.---.---"] = {
+            'epochs': total_epochs, 'clients': total_clients,
+            'ups': total_ups, 'downs': total_downs
+        }
+        self.ip_list.addItem("---.---.---.---")
+
+
+    def parse_log_file(self, file_path):
+        """Converts raw disk text into high-speed memory arrays with decimation."""
+        raw_rows = []
+        try:
+            with open(file_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) == 4:
+                        # parts: [timestamp_str, clients, ups, downs]
+                        raw_rows.append(parts)                            
+            
+            # Convert decimated rows into the final cache format
+            data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+            for row in raw_rows:
+                # row is (datetime_obj, avg_clients, avg_ups, anchor_down)
+                last_ts = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                data['epochs'].append(last_ts.timestamp())
+                data['clients'].append(row[1])
+                data['ups'].append(row[2])
+                data['downs'].append(row[3])
+                
+            return data
+
+        except Exception as e:
+            print(f"Error parsing {file_path}: {e}")
+            return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); gui = ConduitGUI(); gui.show(); sys.exit(app.exec_())
