@@ -73,7 +73,7 @@ Here is the GUI interface for Conduit Management:
 *(Screenshot showing Conduit network traffic feature)*
 
 ### Running Python Script
-To run ConduitQT.py, simply double click on or run them in the command line terminal using the py command in Windows `py ConduitQT.py`, or python3 in Linux or macOS `python3 ConduitQT.py`.
+To run ConduitQt.py, simply double click on or run them in the command line terminal using the py command in Windows `py ConduitQt.py`, or python3 in Linux or macOS `python3 ConduitQt.py`.
 
 ---
 
@@ -85,10 +85,10 @@ The Start, Stop, Re-Start, Reset, Status, Upgrade, Deploy allows you to manage y
 For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory that you run any of the scripts. Upon successfull deployment the ssh public key will be injected to the server and root password will be removed from servers.txt. You must add root server for deployment if you plan to deploy mutiple servers simultaneouly. If you plan to deploy single server through the GUI applcation you will be prompted to enter the root password. Any comunication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22.
 
 **Format:**
-`name,hostname,port,username`. Do not add this header to servers.txt.
+`name,hostname,port,username,password`. Do not add this header to servers.txt.
 
 **Example:**
-`MyServer,123.45.67.89,22,root`
+`MyServer,123.45.67.89,22,root,password`
 
 ## Monitoring
 
