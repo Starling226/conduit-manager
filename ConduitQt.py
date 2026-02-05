@@ -35,7 +35,7 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     print("[INFO] macOS High-DPI Scaling Enabled")
 
 CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
-
+APP_VERSION = "2.0.1"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -833,7 +833,7 @@ WantedBy=multi-user.target
 class ConduitGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Conduit Management Console")
+        self.setWindowTitle("Conduit Manager")
         self.setMinimumSize(1100, 800)
         self.server_data = [] 
         self.current_path = ""
@@ -863,8 +863,14 @@ class ConduitGUI(QMainWindow):
         except (NameError, IndexError):
             version_tag = "Unknown"
 
-        self.lbl_version = QLabel(f"Conduit Version: {version_tag}")
+# Combine them or stack them
+
+        version_text = f"Manager: v{APP_VERSION} | Conduit: {version_tag}"
+        self.lbl_version = QLabel(version_text)
         self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
+
+#        self.lbl_version = QLabel(f"Conduit Version: {version_tag}")
+#        self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
         
         # This stretch pushes everything after it to the right wall
 #        file_box.addStretch(1) 
@@ -1505,13 +1511,13 @@ class ConduitGUI(QMainWindow):
     def confirm_action(self, action):
         """Standard guard for Start, Stop, and Restart"""
 #        count = self.sel.count()
-        print('B')
+
         targets = self.get_target_servers(True)
         count = len(targets)
         if count == 0:
             QMessageBox.warning(self, "No Selection", "Please add servers to the 'Selected' list first.")
             return
-        print('C')
+
         # Personalize the message based on the action
         action_title = action.capitalize()
         if action == "restart":
@@ -2097,7 +2103,7 @@ class VisualizerWindow(QMainWindow):
                 
                 # 4. Explicitly call the plot based on radio state
                 if self.radio_total.isChecked():
-                    self.plot_cumulative(data)
+                    self.plot_cumulative(data, ip)
                 else:
                     self.plot_instantaneous(data)
                 
@@ -2248,7 +2254,7 @@ class VisualizerWindow(QMainWindow):
 
             # 2. PASS THE DICTIONARY, NOT THE IP STRING
             if self.radio_total.isChecked():
-                self.plot_cumulative(data_obj)   # Pass the object {}
+                self.plot_cumulative(data_obj, ip)   # Pass the object {}
             else:
                 self.plot_instantaneous(data_obj) # Pass the object {}
         else:
@@ -2265,7 +2271,7 @@ class VisualizerWindow(QMainWindow):
             data_obj = self.data_cache[ip]
             
             if self.radio_total.isChecked():
-                self.plot_cumulative(data_obj)
+                self.plot_cumulative(data_obj, ip)
             else:
                 self.plot_instantaneous(data_obj)
 
@@ -2276,7 +2282,7 @@ class VisualizerWindow(QMainWindow):
             ip = current_item.text()
             # GET the dictionary from cache, don't just pass the string 'ip'
             if ip in self.data_cache:
-                self.plot_cumulative(self.data_cache[ip])
+                self.plot_cumulative(self.data_cache[ip],ip)
 
     def on_instant_clicked(self):
         """Slot for the 'Interval' radio button."""
@@ -2349,7 +2355,7 @@ class VisualizerWindow(QMainWindow):
         # Rescale Y-axis for the new data
         for p in [self.p_clients, self.p_up, self.p_down]: p.enableAutoRange(axis='y')
 
-    def plot_cumulative(self, data):
+    def plot_cumulative(self, data, ip):
         """Plots total usage using cached memory data with dynamic units."""
         # 1. Always clear first to ensure we don't overlay data
         self.p_clients.clear()
@@ -2399,9 +2405,15 @@ class VisualizerWindow(QMainWindow):
         self.p_down.plot(data['epochs'], scaled_downs, pen=pg.mkPen('#ff9f43', width=2), clear=True)
 
         # 5. Update Titles/Labels to show the unit
-        self.p_up.setTitle(f"Total Up ({unit})")
-        self.p_down.setTitle(f"Total Down ({unit})")
-        
+        if ip != "---.---.---.---":
+            self.p_clients.setTitle(f"Total Clients")
+            self.p_up.setTitle(f"Total Up ({unit})")            
+            self.p_down.setTitle(f"Total Down ({unit})")
+        else:
+            self.p_up.setTitle(f"Total Up - all servers ({unit})")
+            self.p_down.setTitle(f"Total Down - all servers ({unit})")
+            self.p_clients.setTitle(f"Total Clients - all servers")
+
         for p in [self.p_clients, self.p_up, self.p_down]: 
             p.enableAutoRange(axis='y')      
 
