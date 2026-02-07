@@ -34,8 +34,9 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
+#CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
 CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -102,13 +103,20 @@ class LogFetcher(QRunnable):
         ip = self.server['ip']
         try:
             # 1. Fetch only relevant lines from journal
-
+            '''
             cmd = (
                 f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | "
                 f"grep '[STATS]' | "
                 f"sed 's/.*conduit\[[0-9]*\]: //' | "
                 f"gzip -c"
             )
+            '''
+
+            cmd = (
+                f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | "
+                f"gzip -c"
+            )
+
 
             text_buffer = io.StringIO()
 
@@ -291,6 +299,42 @@ class AutoStatsWorker(QThread):
         # Sort by IP or clients if preferred, then emit to GUI
         self.stats_ready.emit(results)
 
+    def fix_reboot_data_points(self, data_points):
+        """
+        Fixes reboot resets for data stored in a list of dictionaries.
+        Expected keys: 'c' (clients), 'u' (upload), 'd' (download)
+        """
+        if len(data_points) < 2:
+            return data_points
+
+        offset_up = 0
+        offset_down = 0
+
+        # Initialize previous raw trackers with the first entry
+        prev_raw_u = data_points[0]['u']
+        prev_raw_d = data_points[0]['d']
+
+        # We start from the second element
+        for i in range(1, len(data_points)):
+            current_raw_u = data_points[i]['u']
+            current_raw_d = data_points[i]['d']
+
+            # Detect Reboot: If current download is less than previous, the counter reset.
+            if current_raw_d < prev_raw_d:
+                offset_up += prev_raw_u
+                offset_down += prev_raw_d
+                # Optional: print("Reboot detected in dictionary data.")
+
+            # Apply offsets to the current dictionary values
+            data_points[i]['u'] = current_raw_u + offset_up
+            data_points[i]['d'] = current_raw_d + offset_down
+
+            # Update the 'previous' trackers with CURRENT raw values for the next loop
+            prev_raw_u = current_raw_u
+            prev_raw_d = current_raw_d
+
+        return data_points
+
     def get_stats(self, s):
         res = {"ip": s['ip'], "success": False, "clients": "0", "up_val": "0 B", "down_val": "0 B"}
         
@@ -328,6 +372,8 @@ class AutoStatsWorker(QThread):
                                 'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
                                 'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}")
                             })
+                    if data_points:
+                        data_points = self.fix_reboot_data_points(data_points)
 
                     if data_points:
                         res["success"] = True
@@ -359,6 +405,7 @@ class AutoStatsWorker(QThread):
         if 'GB' in u: return num * 1024**3
         if 'MB' in u: return num * 1024**2
         if 'KB' in u: return num * 1024
+        if 'B' in u: return num
         return num
 
     def format_bytes(self, b):
@@ -515,6 +562,41 @@ class StatsWorker(QThread):
         results = sorted(results, key=lambda x: x.get('mbps_val', 0), reverse=True)
         self.finished_signal.emit(self.generate_table(results))
 
+    def fix_reboot_data_points(self, data_points):
+        """
+        Fixes reboot resets for data stored in a list of dictionaries.
+        Expected keys: 'c' (clients), 'u' (upload), 'd' (download)
+        """
+        if len(data_points) < 2:
+            return data_points
+
+        offset_up = 0
+        offset_down = 0
+
+        # Initialize previous raw trackers with the first entry
+        prev_raw_u = data_points[0]['u']
+        prev_raw_d = data_points[0]['d']
+
+        # We start from the second element
+        for i in range(1, len(data_points)):
+            current_raw_u = data_points[i]['u']
+            current_raw_d = data_points[i]['d']
+
+            # Detect Reboot: If current download is less than previous, the counter reset.
+            if current_raw_d < prev_raw_d:
+                offset_up += prev_raw_u
+                offset_down += prev_raw_d
+                # Optional: print("Reboot detected in dictionary data.")
+
+            # Apply offsets to the current dictionary values
+            data_points[i]['u'] = current_raw_u + offset_up
+            data_points[i]['d'] = current_raw_d + offset_down
+
+            # Update the 'previous' trackers with CURRENT raw values for the next loop
+            prev_raw_u = current_raw_u
+            prev_raw_d = current_raw_d
+
+        return data_points
 
     def get_stats(self, s):
         display_label = s['name'] if self.display_mode == 'name' else s['ip']
@@ -542,6 +624,7 @@ class StatsWorker(QThread):
                     
                     data_points = []
                     for line in lines:
+                        print(line)
                         m = pattern.search(line)
                         if m:
                             data_points.append({
@@ -550,6 +633,9 @@ class StatsWorker(QThread):
                                 'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}"),
                                 'ut': m.group(6)
                             })
+
+                    if data_points:
+                        data_points = self.fix_reboot_data_points(data_points)
 
                     if data_points:
                         res["success"] = True
@@ -603,6 +689,7 @@ class StatsWorker(QThread):
         if 'GB' in u: return num * 1024**3
         if 'MB' in u: return num * 1024**2
         if 'KB' in u: return num * 1024
+        if 'B'  in u: return num
         return num
 
 #    def strip_ansi(text):
@@ -785,6 +872,8 @@ class DeployWorker(QThread):
                 conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
                 conn.run("chmod +x /opt/conduit/conduit")
 
+#ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file /opt/conduit/stats.json --data-dir /var/lib/conduit
+#ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit
                 # 4. Manually Create the Service File (Replacing 'service install')
                 service_content = f"""[Unit]
 Description=Psiphon Conduit inproxy service - relays traffic for users in censored regions
@@ -908,12 +997,19 @@ WantedBy=multi-user.target
                 conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
                 conn.run("chmod +x /opt/conduit/conduit")
 
+                if self.params['update']:
+                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
+#                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                    conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                    conn.run("systemctl daemon-reload")
+
                 # 5. Start
                 conn.run("systemctl start conduit", hide=True)                
                 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
                 conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+#                conn.run("mv /opt/conduit/2026-conduit.log /opt/conduit/2026-conduit.log.1")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
                 cron_cmd = "0 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
@@ -1187,8 +1283,14 @@ class ConduitGUI(QMainWindow):
         self.btn_to_pool.clicked.connect(self.move_to_pool)
         self.btn_del.clicked.connect(self.delete_srv)
         self.btn_quit.clicked.connect(self.close)
-        self.rad_name.toggled.connect(self.sync_ui)
-        self.rad_ip.toggled.connect(self.sync_ui)
+        
+#        self.rad_name.toggled.connect(self.sync_ui)
+#        self.rad_ip.toggled.connect(self.sync_ui)
+
+        # Change this in init_ui
+        self.rad_name.toggled.connect(lambda checked: self.sync_ui() if checked else None)
+        self.rad_ip.toggled.connect(lambda checked: self.sync_ui() if checked else None)
+
 #        self.btn_re.clicked.connect(lambda: QMessageBox.information(self, "Info", "Use Restart if server is already running."))
 
         self.btn_start.clicked.connect(lambda: self.confirm_action("start"))
@@ -1237,13 +1339,16 @@ class ConduitGUI(QMainWindow):
         return f"{b:.2f} PB"
 
     def update_stats_table(self, results):
-        """Updates the table using custom numeric items to preserve unit display."""
+        """Updates the table with dynamic Name/IP toggle support."""
         self.stats_table.setSortingEnabled(False)
-        
+
+        # 1. Update Header based on Radio Button
+        display_header = "Server Name" if self.rad_name.isChecked() else "IP Address"
         win = self.edit_window.text()
         self.stats_table.setHorizontalHeaderLabels([
-            "IP Address", "Avg Clients", f"Up ({win}m)", f"Down ({win}m)"
+            display_header, "Avg Clients", f"Up ({win}m)", f"Down ({win}m)"
         ])
+        
         self.stats_table.setRowCount(0)
         
         # Initial sort: Online first
@@ -1275,17 +1380,28 @@ class ConduitGUI(QMainWindow):
                 total_up_bytes += u_bytes
                 total_down_bytes += d_bytes
 
-            # 1. IP Item (Standard)
-            ip_item = QTableWidgetItem(r["ip"])
+            # Normalize IP and lookup name
+            raw_ip = str(r["ip"]).strip()
+            server_name = raw_ip
+            for s in self.server_data:
+                if str(s['ip']).strip() == raw_ip:
+                    server_name = str(s['name']).strip()
+                    break
             
-            # 2. Client Item (Custom sort)
+            display_text = server_name if self.rad_name.isChecked() else raw_ip
+
+            # 1. Column 0: IP/Name Item
+            ip_item = QTableWidgetItem(display_text)
+            ip_item.setData(Qt.UserRole, raw_ip) 
+
+            # 2. Column 1: Client Item
             client_text = str(c_val) if is_ok else r["clients"]
             client_item = NumericTableWidgetItem(client_text, c_val)
 
-            # 3. Up Item (Custom sort - displays text, sorts by bytes)
+            # 3. Column 2: Up Item
             up_item = NumericTableWidgetItem(r["up_val"], u_bytes)
 
-            # 4. Down Item (Custom sort - displays text, sorts by bytes)
+            # 4. Column 3: Down Item
             down_item = NumericTableWidgetItem(r["down_val"], d_bytes)
 
             items = [ip_item, client_item, up_item, down_item]
@@ -1293,6 +1409,7 @@ class ConduitGUI(QMainWindow):
             for col, item in enumerate(items):
                 item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 
+                # Apply Colors & Fonts
                 if is_ok:
                     if col == 0:
                         item.setForeground(QBrush(COLOR_ONLINE))
@@ -1307,12 +1424,13 @@ class ConduitGUI(QMainWindow):
 
                     if col > 0 and r["clients"] != "Stopped":
                         item.setText("-")
-                        # Set sort value to -1 so offline servers go to bottom in desc sort
-                        if hasattr(item, 'sort_value'): item.sort_value = -1 
+                        if hasattr(item, 'sort_value'):
+                            item.sort_value = -1 
                 
                 if col != 0:
                     item.setTextAlignment(Qt.AlignCenter)
                 
+                # We only call setItem ONCE per column here
                 self.stats_table.setItem(row, col, item)
 
         # Update Footer Labels
@@ -1324,7 +1442,9 @@ class ConduitGUI(QMainWindow):
         self.lbl_last_updated.setText(f"Last Sync: {now}")
 
         self.stats_table.setSortingEnabled(True)
-
+        
+        # Final Step: Sync the rest of the UI (ListWidgets) to match
+        self.sync_ui()
 
     def update_timer_interval(self):
         """Restarts the timer with the interval specified in the Refresh box."""
@@ -1499,7 +1619,8 @@ class ConduitGUI(QMainWindow):
         params = {
             "user": "root",
             "clients": validated['clients'], 
-            "bw": validated['bw']            
+            "bw": validated['bw'],
+            "update": self.chk_upd.isChecked()
         }
 
         # UI Feedback and Start Thread
@@ -1536,8 +1657,9 @@ class ConduitGUI(QMainWindow):
             row = index.row()            
             ip_item = self.stats_table.item(row, 0) 
             if ip_item:
+                target_ip = ip_item.data(Qt.UserRole)
                 for s in self.server_data:
-                    if s['ip'] == ip_item.text().strip():
+                    if s['ip'] == target_ip:
                         selected_targets.append(s)
 
         if selected_targets and warnin_flag:
@@ -1586,7 +1708,8 @@ class ConduitGUI(QMainWindow):
         params = {
             "user": "root",
             "clients": validated['clients'], 
-            "bw": validated['bw']            
+            "bw": validated['bw'],
+            "update": self.chk_upd.isChecked()        
         }
 
         # UI Feedback and Start Thread
@@ -1669,14 +1792,46 @@ class ConduitGUI(QMainWindow):
 
     def sync_ui(self):
         """Updates display text for all items using the hidden IP key."""
-        attr = 'name' if self.rad_name.isChecked() else 'ip'
+        is_name_mode = self.rad_name.isChecked()
+        
+        # Block sorting during update to prevent row-jumping
+        self.stats_table.setSortingEnabled(False)
+        
+        # 1. Update the Header
+        if self.stats_table.horizontalHeaderItem(0):
+            self.stats_table.horizontalHeaderItem(0).setText("Server Name" if is_name_mode else "IP Address")
+
+        # 2. Update Table Rows
+        for row in range(self.stats_table.rowCount()):
+            item = self.stats_table.item(row, 0)
+            if not item:
+                continue # Skip if item doesn't exist
+
+            hidden_ip = item.data(Qt.UserRole)
+            if not hidden_ip:
+                continue
+
+            # Determine correct text
+            target_text = str(hidden_ip).strip()
+            if is_name_mode:
+                for s in self.server_data:
+                    if str(s['ip']).strip() == target_text:
+                        target_text = str(s['name']).strip()
+                        break
+            
+            item.setText(target_text)
+
+        self.stats_table.setSortingEnabled(True)
+
+        # 3. Update ListWidgets
+        attr = 'name' if is_name_mode else 'ip'
         for lw in [self.pool, self.sel]:
             for i in range(lw.count()):
                 it = lw.item(i)
-                ip = it.data(Qt.UserRole)
+                ip_key = it.data(Qt.UserRole)
                 for s in self.server_data:
-                    if s['ip'] == ip: 
-                        it.setText(s[attr])
+                    if str(s['ip']).strip() == str(ip_key).strip():
+                        it.setText(str(s[attr]).strip())
                         break
             lw.sortItems()
 
@@ -2013,7 +2168,7 @@ class ConduitGUI(QMainWindow):
                             'port': str(port_num), # Keep as string for Fabric
                             'user': parts[3], 
                             'pass': parts[4] if len(parts) > 4 else ''
-                        }                        
+                        }   
 
                         self.server_data.append(d)
                         self.pool.addItem(self.create_item(d))
@@ -2254,7 +2409,64 @@ class VisualizerWindow(QMainWindow):
         except:
             return 0
 
+    def parse_record(self,line):
+        # Dynamic detection of version
+        if "Connecting" in line:
+            pattern = r"(\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2}).*?Connected:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
+            match = re.search(pattern, line)
+            if match: return match.groups()
+        else:
+            pattern = r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})[+-]\d{4}.*?Clients:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
+            match = re.search(pattern, line)
+            if match:
+                # Constructing the list of 4
+                result = [
+                    f"{match.group(1)} {match.group(2)}", 
+                    match.group(3),                       
+                    match.group(4),                       
+                    match.group(5)                        
+                ]
+                return result
+            else:
+                return None
+
+        return None
+
     def process_raw_file(self, ip):
+        """
+        Takes the raw journalctl output and converts it to a clean tab-separated log.
+        This runs on the local machine after all downloads are finished.
+        """
+        raw_path = f"server_logs/{ip}.raw"
+        log_path = f"server_logs/{ip}.log"
+    
+        if not os.path.exists(raw_path):
+            return
+
+        valid_lines = 0
+        try:
+            with open(raw_path, "r") as r, open(log_path, "w") as f:
+                for line in r:
+                    # 1. Regex to extract: Date, Clients, UP, DOWN
+                    if (res := self.parse_record(line)) is not None:
+                        dt_raw, clients, up_str, down_str = res
+                    
+                        # 2. Format data
+                        dt = dt_raw.replace('T', ' ')
+                        up_bytes = self.parse_to_bytes(up_str)
+                        down_bytes = self.parse_to_bytes(down_str)                    
+                        # 3. Write standardized columns
+                        f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
+                        valid_lines += 1
+        
+            # Optional: Remove the raw file to save space after processing
+            os.remove(raw_path)
+            print(f"✅ {ip}: Processed {valid_lines} lines.")
+        
+        except Exception as e:
+            print(f"❌ Error processing raw data for {ip}: {e}")
+
+    def process_raw_file2(self, ip):
         """
         Takes the raw journalctl output and converts it to a clean tab-separated log.
         This runs on the local machine after all downloads are finished.
@@ -2286,7 +2498,7 @@ class VisualizerWindow(QMainWindow):
                         valid_lines += 1
         
             # Optional: Remove the raw file to save space after processing
-            os.remove(raw_path)
+#            os.remove(raw_path)
             print(f"✅ {ip}: Processed {valid_lines} lines.")
         
         except Exception as e:
@@ -2565,6 +2777,49 @@ class VisualizerWindow(QMainWindow):
         self.ip_list.addItem("---.---.---.---")
 
 
+    def fix_reboot_counters(self, raw_rows):
+        """
+        Detects server reboots by checking if cumulative counters drop.
+        Applies a running offset to make Ups and Downs strictly increasing.
+        """
+        if len(raw_rows) < 2:
+            return raw_rows
+
+        offset_up = 0
+        offset_down = 0
+        
+        # We must track the RAW values from the previous line to detect the reset
+        # row: [timestamp, clients, ups, downs]
+        prev_raw_up = int(raw_rows[0][2])
+        prev_raw_down = int(raw_rows[0][3])
+
+        # Note: The first row remains as-is (no offset applied yet)
+        for i in range(1, len(raw_rows)):
+            current_raw_up = int(raw_rows[i][2])
+            current_raw_down = int(raw_rows[i][3])
+
+            # Detect Reboot: If current is less than previous, the counter reset.
+            # We use 'down' as the primary indicator for reboot.
+            if current_raw_down < prev_raw_down:
+                offset_up += prev_raw_up
+                offset_down += prev_raw_down
+                # Optional: log the reboot event
+                # print(f"Reboot detected at {raw_rows[i][0]}")
+
+            # Apply the cumulative offsets to the current values
+            corrected_up = current_raw_up + offset_up
+            corrected_down = current_raw_down + offset_down
+
+            # Update the prev_raw trackers BEFORE we overwrite the row data
+            prev_raw_up = current_raw_up
+            prev_raw_down = current_raw_down
+
+            # Update the raw_rows list in-place
+            raw_rows[i][2] = corrected_up
+            raw_rows[i][3] = corrected_down
+
+        return raw_rows
+
     def decimate_by_download(self, raw_rows):
         """
         Groups data by constant Download values. 
@@ -2572,6 +2827,8 @@ class VisualizerWindow(QMainWindow):
         """
         if not raw_rows:
             return []
+
+        raw_rows = self.fix_reboot_counters(raw_rows)
 
         decimated = []
         
@@ -2619,8 +2876,36 @@ class VisualizerWindow(QMainWindow):
             avg_clients = round(sum(current_batch_clients) / len(current_batch_clients))
             avg_ups = int(sum(current_batch_ups) / len(current_batch_ups))
             decimated.append((last_ts, avg_clients, avg_ups, anchor_down))
+        print('decimated: ',len(decimated))
+#        return decimated
 
-        return decimated
+        # 1. Convert timestamps to unix floats
+        # Assuming d[0] is a datetime object from your previous parsing step
+        times = np.array([d[0].timestamp() for d in decimated])
+        clients_arr = np.array([d[1] for d in decimated])
+        ups_arr = np.array([d[2] for d in decimated])
+        downs_arr = np.array([d[3] for d in decimated])
+
+        # 2. Create 1-minute (60s) grid
+        start_time = times[0]
+        end_time = times[-1]
+        new_times = np.arange(start_time, end_time, 60)
+
+        # 3. Interpolate values across the new grid
+        # np.interp is highly optimized for this
+        resampled_clients = np.interp(new_times, times, clients_arr).round().astype(int)
+        resampled_ups = np.interp(new_times, times, ups_arr).astype(int)
+        resampled_downs = np.interp(new_times, times, downs_arr).astype(int)
+
+        # 4. Reconstruct the list of tuples
+        # FIXED: Returning datetime objects instead of strings to avoid .timestamp() error
+        final_result = [
+            (datetime.fromtimestamp(t), c, u, d)
+            for t, c, u, d in zip(new_times, resampled_clients, resampled_ups, resampled_downs)
+        ]
+
+        print(f'Decimated: {len(decimated)} | Resampled: {len(final_result)}')
+        return final_result
 
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
