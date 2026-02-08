@@ -34,9 +34,15 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
-#CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
-CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
-APP_VERSION = "2.2.0"
+#conduit_release = "pre_release"
+conduit_release = "official"
+
+if conduit_release == "official":
+    CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+else:
+    CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
+
+APP_VERSION = "2.2.3"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -602,7 +608,7 @@ class StatsWorker(QThread):
         display_label = s['name'] if self.display_mode == 'name' else s['ip']
         res = {"label": display_label, "success": False, "clients": "0", "up": "0B", 
                "down": "0B", "uptime": "Offline", "mbps": "0.00", "mbps_val": 0.0,
-               "up_1h": "0B", "down_1h": "0B"}
+               "mbps_1h": "0.00","up_1h": "0B", "down_1h": "0B"}
         
         try:
             home = os.path.expanduser("~")
@@ -621,10 +627,9 @@ class StatsWorker(QThread):
                     # Pattern for: [STATS] Clients: 72 | Up: 236.8 MB | Down: 1.6 GB | Uptime: 37m54s
                     pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Uptime:\s*([\w\d]+)")
 #                    pattern = re.compile(r"Clients:\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Uptime:\s*([\w\d]+)")
-                    
+            
                     data_points = []
                     for line in lines:
-                        print(line)
                         m = pattern.search(line)
                         if m:
                             data_points.append({
@@ -655,12 +660,21 @@ class StatsWorker(QThread):
                         res["up_1h"] = self.format_bytes(max(0, last['u'] - first['u']))
                         res["down_1h"] = self.format_bytes(max(0, last['d'] - first['d']))
 
+                        
                         # Mbps logic
                         total_sec = self.uptime_to_seconds(res["uptime"])
                         if total_sec > 0:
-                            mbps = (last['d'] * 8) / total_sec / 10**6
+                            mbps = (last['d'] * 8) / total_sec / (1024*1024)
                             res["mbps_val"] = mbps
                             res["mbps"] = f"{mbps:.2f}"
+
+                        ut_1h_last = self.uptime_to_seconds(last['ut'])
+                        ut_1h_first = self.uptime_to_seconds(first['ut'])
+                        ut_1h = ut_1h_last - ut_1h_first
+                        if ut_1h > 0:
+                            mbps_1h = ((last['d'] - first['d']) * 8) / ut_1h / (1024*1024)
+                            res["mbps_1h"] = f"{mbps_1h:.2f}"
+                        
                 else:
                     res["uptime"] = "No Data (1h)"
 
@@ -705,9 +719,10 @@ class StatsWorker(QThread):
     def generate_table(self, results):
         # 1. Main Table Generation
         # width adjusted to 105 for comfortable spacing
-        width = 105
-        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<20} │ {'Down (total | 1h)':<20} │ {'Uptime':<14} │ {'Mbps':<6} │\n"
-        sep = "├" + "─"*22 + "┼" + "─"*10 + "┼" + "─"*22 + "┼" + "─"*22 + "┼" + "─"*16 + "┼" + "─"*8 + "┤\n"
+        width = 116
+        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<20} │ {'Down (total | 1h)':<20} │ {'Uptime':<14} │ {'Mbps (total | 1h)':<17} │\n"
+#        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<20} │ {'Down (total | 1h)':<20} │ {'Uptime':<14} │ {'Mbps':<6} │\n"
+        sep = "├" + "─"*22 + "┼" + "─"*10 + "┼" + "─"*22 + "┼" + "─"*22 + "┼" + "─"*16 + "┼" + "─"*19 + "┤\n"
         
         body = ""
         valid_results = [r for r in results if r["success"]]
@@ -719,10 +734,11 @@ class StatsWorker(QThread):
                 # Traffic format: "Total | Delta"
                 up_val = f"{r['up']} | {r['up_1h']}"
                 down_val = f"{r['down']} | {r['down_1h']}"
+                mbps_vals = f"{r['mbps']} | {r['mbps_1h']}"
                 
-                body += f"│ {status} {r['label'][:18]:<18} │ {r['clients']:<8} │ {up_val:<20} │ {down_val:<20} │ {r['uptime']:<14} │ {r['mbps']:<6} │\n"
+                body += f"│ {status} {r['label'][:18]:<18} │ {r['clients']:<8} │ {up_val:<20} │ {down_val:<20} │ {r['uptime']:<14} │ {mbps_vals:<14}    │\n"
             else:
-                body += f"│ {status} {r['label'][:18]:<18} │ {'-':<8} │ {'-':<20} │ {'-':<20} │ {r['uptime']:<14} │ {'0.00':<6} │\n"
+                body += f"│ {status} {r['label'][:18]:<18} │ {'-':<8} │ {'-':<20} │ {'-':<20} │ {r['uptime']:<14} │ {'0.00 | 0.00':<14}    │\n"
         
         main_table = f"┌" + "─"*width + "┐\n" + head + sep + body + "└" + "─"*width + "┘"
 
@@ -829,6 +845,25 @@ class DeployWorker(QThread):
                 "banner_timeout": 20
             }
 
+            if conduit_release == 'pre_release':
+                # Pre-release uses the extra config, geo, and stats flags
+                exec_cmd = (
+                    f"/opt/conduit/conduit start "
+                    f"--max-clients {self.params['clients']} "
+                    f"--bandwidth {self.params['bw']} "
+                    f"--psiphon-config /opt/conduit/psiphon_config.json "
+                    f"--geo --stats-file /opt/conduit/stats.json "
+                    f"--data-dir /var/lib/conduit"
+                )
+            else:
+                # Official release uses the simplified command
+                exec_cmd = (
+                f"/opt/conduit/conduit start "
+                f"--max-clients {self.params['clients']} "
+                f"--bandwidth {self.params['bw']} "
+                f"--data-dir /var/lib/conduit"
+            )
+
             if pwd:
                 conn_params["password"] = pwd
                 conn_params["look_for_keys"] = True
@@ -853,9 +888,11 @@ class DeployWorker(QThread):
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
 
                 # 1. Key Injection
+                '''
                 conn.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh", hide=True)
                 conn.run(f'echo "{pub_key}" >> ~/.ssh/authorized_keys', hide=True)
                 conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
+                '''
 
                 # 2. Cleanup & Directory Prep
                 conn.run("systemctl stop conduit", warn=True, hide=True)
@@ -863,6 +900,7 @@ class DeployWorker(QThread):
                 conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
                 conn.run("mkdir -p /opt/conduit", hide=True)
                 # Crucial: The service hardening requires this directory to exist beforehand
+                conn.run("rm -rf /var/lib/conduit", warn=True, hide=True)
                 conn.run("mkdir -p /var/lib/conduit", hide=True) 
 
                 pkg_cmd = "dnf install wget firewalld curl -y" if conn.run("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
@@ -872,8 +910,6 @@ class DeployWorker(QThread):
                 conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
                 conn.run("chmod +x /opt/conduit/conduit")
 
-#ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file /opt/conduit/stats.json --data-dir /var/lib/conduit
-#ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit
                 # 4. Manually Create the Service File (Replacing 'service install')
                 service_content = f"""[Unit]
 Description=Psiphon Conduit inproxy service - relays traffic for users in censored regions
@@ -882,7 +918,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit
+ExecStart={exec_cmd}
 Restart=always
 RestartSec=10
 User=root
@@ -997,9 +1033,15 @@ WantedBy=multi-user.target
                 conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
                 conn.run("chmod +x /opt/conduit/conduit")
 
-                if self.params['update']:
-                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
-#                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                if conduit_release == 'pre_release':
+                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                    conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                    conn.run("systemctl daemon-reload")
+                
+                if conduit_release != 'pre_release':
+                    if self.params['update']:
+                        cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
+                    
                     conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
                     conn.run("systemctl daemon-reload")
 
@@ -1009,6 +1051,13 @@ WantedBy=multi-user.target
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
                 conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+    
+                current_year = datetime.now().year
+                filename = f"/opt/conduit/{current_year}-conduit.log"
+                backup_log = f"/opt/conduit/{current_year}-conduit.log.bak"
+                # Check if file exists (-f) then move (mv)
+                conn.run(f'[ -f {filename} ] && mv {filename} {backup_log}', hide=True)
+
 #                conn.run("mv /opt/conduit/2026-conduit.log /opt/conduit/2026-conduit.log.1")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
@@ -2184,6 +2233,16 @@ class VisualizerWindow(QMainWindow):
         self.setWindowTitle("Conduit Analytics Visualizer")
         self.resize(1400, 850)
         self.server_list = server_list
+
+        d = {
+            "name": "---TOTAL---",
+            "ip":   "---.---.---.---",
+            "port": 22,
+            "user": "",
+            "pass": ""
+        }
+        self.server_list.append(d)
+
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
         
@@ -2199,9 +2258,13 @@ class VisualizerWindow(QMainWindow):
         self.ip_list = QListWidget()
         self.ip_list.setFixedWidth(180)
         # Populate IPs
+
         for s in self.server_list:
-            self.ip_list.addItem(s['ip'])
-        
+            item = QListWidgetItem(s['ip'])
+            # Store the permanent IP in UserRole so we can always find it
+            item.setData(Qt.UserRole, s['ip']) 
+            self.ip_list.addItem(item)
+
         self.ip_list.setStyleSheet("""
             QListWidget {
                 font-family: 'Consolas';
@@ -2300,6 +2363,15 @@ class VisualizerWindow(QMainWindow):
 
         self.radio_instant.clicked.connect(self.refresh_current_plot)
 
+        self.rad_name = QRadioButton("Display Name")
+        self.rad_ip = QRadioButton("Display IP")
+        self.rad_ip.setChecked(True)
+        bottom_lay.addWidget(self.rad_name)
+        bottom_lay.addWidget(self.rad_ip)
+
+        self.rad_name.toggled.connect(self.sync_disp_ui)
+        self.rad_ip.toggled.connect(self.sync_disp_ui)
+
         self.status_label = QLabel("Last Sync: Never")
         # Use Consolas for that "Conduit Version" terminal look
         self.status_label.setFont(QFont("Consolas", 10, QFont.Bold))
@@ -2320,6 +2392,41 @@ class VisualizerWindow(QMainWindow):
         self.ip_list.currentItemChanged.connect(self.refresh_current_plot)
         self.check_local_data_on_startup()        
         self._is_initializing = False     
+
+    def sync_disp_ui(self):
+        """Updates display text for all items using the hidden IP key."""
+        is_name_mode = self.rad_name.isChecked()
+    
+        # Choose which key to show: 'name' or 'ip'
+        attr = 'name' if is_name_mode else 'ip'
+    
+        # We must block signals so the text change doesn't trigger 
+        # 'refresh_current_plot' 40 times in a row.
+        self.ip_list.blockSignals(True)
+    
+        # Correct way to iterate through a QListWidget
+        for i in range(self.ip_list.count()):
+            item = self.ip_list.item(i)
+        
+            # Get the hidden IP we stored in UserRole
+            ip_key = item.data(Qt.UserRole)    
+
+            # Look up the name in your server_list
+            found = False
+            for s in self.server_list:
+                if str(s['ip']) == str(ip_key):
+                    item.setText(str(s[attr]))
+                    found = True
+                    break
+        
+            if not found:
+                print(f"Warning: Could not find server data for IP {ip_key}")
+
+        self.ip_list.sortItems()
+        self.ip_list.blockSignals(False)
+    
+        # Force the UI to repaint
+        self.ip_list.update()
 
     def set_status_color(self, color_name):
         """Sets the status label color (red for old, dark gray/white for fresh)."""
@@ -2466,44 +2573,6 @@ class VisualizerWindow(QMainWindow):
         except Exception as e:
             print(f"❌ Error processing raw data for {ip}: {e}")
 
-    def process_raw_file2(self, ip):
-        """
-        Takes the raw journalctl output and converts it to a clean tab-separated log.
-        This runs on the local machine after all downloads are finished.
-        """
-        raw_path = f"server_logs/{ip}.raw"
-        log_path = f"server_logs/{ip}.log"
-    
-        if not os.path.exists(raw_path):
-            return
-
-        # 1. Regex to extract: Date, Clients, UP, DOWN
-
-        pattern = r"^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\s\[STATS\].*?Connected:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
-    
-        valid_lines = 0
-        try:
-            with open(raw_path, "r") as r, open(log_path, "w") as f:
-                for line in r:
-                    match = re.search(pattern, line)
-                    if match:
-                        dt_raw, clients, up_str, down_str = match.groups()
-                    
-                        # 2. Format data
-                        dt = dt_raw.replace('T', ' ')
-                        up_bytes = self.parse_to_bytes(up_str)
-                        down_bytes = self.parse_to_bytes(down_str)                    
-                        # 3. Write standardized columns
-                        f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
-                        valid_lines += 1
-        
-            # Optional: Remove the raw file to save space after processing
-#            os.remove(raw_path)
-            print(f"✅ {ip}: Processed {valid_lines} lines.")
-        
-        except Exception as e:
-            print(f"❌ Error processing raw data for {ip}: {e}")
-
     def on_fetch_complete(self):
         """Called when HistoryWorker (the network threads) finishes."""
         self.status_label.setText("Processing Raw Logs...")
@@ -2558,7 +2627,9 @@ class VisualizerWindow(QMainWindow):
         if not current_item:
             return
             
-        ip = current_item.text()
+#        ip = current_item.text()
+        ip = current_item.data(Qt.UserRole)
+
         if ip in self.data_cache:
             data_obj = self.data_cache[ip]
             
@@ -2693,24 +2764,16 @@ class VisualizerWindow(QMainWindow):
 
     def load_all_logs_into_memory(self):
         """Reads logs and creates a Global Total with reboot-resilient summing."""
-
-        existing_items = self.ip_list.findItems("---.---.---.---", Qt.MatchExactly)
-
-        # If it exists, remove it
-        if existing_items:
-            for item in existing_items:
-                row = self.ip_list.row(item)
-                self.ip_list.takeItem(row)
-
         self.data_cache.clear()
-        server_list = sorted(self.server_list, key=lambda x: x['ip'])
+        
+        # Sort excluding the virtual IP for the file-reading phase
+        actual_servers = [s for s in self.server_list if s['ip'] != "---.---.---.---"]
         
         all_epochs = []
-        for server in server_list:
+        for server in actual_servers:
             ip = server['ip']
             file_path = f"server_logs/{ip}.log"
             if os.path.exists(file_path):
-                print(f"Reading: {ip}")
                 data = self.parse_log_file(file_path)
                 self.data_cache[ip] = data
                 if data['epochs']:
@@ -2719,47 +2782,35 @@ class VisualizerWindow(QMainWindow):
         if not all_epochs:
             return
 
-        # --- SETUP FOR GLOBAL SUMMING ---
+        # --- GLOBAL SUMMING CALCULATION ---
         start_t = int(min(all_epochs))
         end_t = int(max(all_epochs))
         
         server_ips = list(self.data_cache.keys())
         cursors = {ip: 0 for ip in server_ips}
-        
-        # Track offsets specifically for the Global Total calculation
-        # This prevents 'reboot drops' from affecting the 255.255.255.255 data.
         up_offsets = {ip: 0 for ip in server_ips}
         down_offsets = {ip: 0 for ip in server_ips}
         
         total_epochs, total_clients, total_ups, total_downs = [], [], [], []
 
-        # 3. Resample: Iterate every second
         for current_t in range(start_t, end_t + 1):
-            s_clients = 0
-            s_ups = 0
-            s_downs = 0
+            s_clients, s_ups, s_downs = 0, 0, 0
 
             for ip in server_ips:
                 data = self.data_cache[ip]
                 idx = cursors[ip]
                 
-                # Check for counter reset BEFORE moving to the next point. This happen when a server restart.
+                # Counter Reset Check (Server Reboot Detection)
                 if idx + 1 < len(data['epochs']) and data['epochs'][idx + 1] <= current_t:
-                    # Look ahead: if next value is lower than current, it's a reboot
                     if data['ups'][idx + 1] < data['ups'][idx]:
                         up_offsets[ip] += data['ups'][idx]
-                        print(f"📈 [Totalizer] Up-Reset detected on {ip} at {current_t}")
-                    
                     if data['downs'][idx + 1] < data['downs'][idx]:
                         down_offsets[ip] += data['downs'][idx]
-                        print(f"📈 [Totalizer] Down-Reset detected on {ip} at {current_t}")
 
-                    # Now safely move the cursor forward
                     while idx + 1 < len(data['epochs']) and data['epochs'][idx + 1] <= current_t:
                         idx += 1
                     cursors[ip] = idx
                 
-                # Sum the value + any accumulated offsets for this server
                 s_clients += data['clients'][idx]
                 s_ups     += (data['ups'][idx] + up_offsets[ip])
                 s_downs   += (data['downs'][idx] + down_offsets[ip])
@@ -2769,12 +2820,13 @@ class VisualizerWindow(QMainWindow):
             total_ups.append(s_ups)
             total_downs.append(s_downs)
 
-        # 5. Assign to virtual IP
+        # Assign calculated totals to the cache key used by the GUI
         self.data_cache["---.---.---.---"] = {
-            'epochs': total_epochs, 'clients': total_clients,
-            'ups': total_ups, 'downs': total_downs
+            'epochs': total_epochs, 
+            'clients': total_clients,
+            'ups': total_ups, 
+            'downs': total_downs
         }
-        self.ip_list.addItem("---.---.---.---")
 
 
     def fix_reboot_counters(self, raw_rows):
@@ -2945,6 +2997,15 @@ class VisualizerReportWindow(QMainWindow):
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
         
+        d = {
+            "name": "---TOTAL---",
+            "ip":   "---.---.---.---",
+            "port": 22,
+            "user": "",
+            "pass": ""
+        }
+        self.server_list.append(d)
+
         self.allow_network = False # Flag to block any automatic network activity
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -2957,9 +3018,15 @@ class VisualizerReportWindow(QMainWindow):
         self.ip_list = QListWidget()
         self.ip_list.setFixedWidth(180)
         # Populate IPs
-        for s in self.server_list:
-            self.ip_list.addItem(s['ip'])
+#        for s in self.server_list:
+#            self.ip_list.addItem(s['ip'])
         
+        for s in self.server_list:
+            item = QListWidgetItem(s['ip'])
+            # Store the permanent IP in UserRole so we can always find it
+            item.setData(Qt.UserRole, s['ip']) 
+            self.ip_list.addItem(item)
+
         self.ip_list.setStyleSheet("""
             QListWidget {
                 font-family: 'Consolas';
@@ -3038,6 +3105,15 @@ class VisualizerReportWindow(QMainWindow):
             lbl.setFixedWidth(180)
             bottom_lay.addWidget(lbl)
 
+        self.rad_name = QRadioButton("Display Name")
+        self.rad_ip = QRadioButton("Display IP")
+        self.rad_ip.setChecked(True)
+        bottom_lay.addWidget(self.rad_name)
+        bottom_lay.addWidget(self.rad_ip)
+
+        self.rad_name.toggled.connect(self.sync_disp_ui)
+        self.rad_ip.toggled.connect(self.sync_disp_ui)
+
         self.status_label = QLabel("Last Sync: Never")
         # Use Consolas for that "Conduit Version" terminal look
         self.status_label.setFont(QFont("Consolas", 10, QFont.Bold))
@@ -3082,6 +3158,41 @@ class VisualizerReportWindow(QMainWindow):
                 return last_line.split('\t')[0] # Returns "YYYY-MM-DD HH:MM:SS"
         except Exception:
             return None
+
+    def sync_disp_ui(self):
+        """Updates display text for all items using the hidden IP key."""
+        is_name_mode = self.rad_name.isChecked()
+    
+        # Choose which key to show: 'name' or 'ip'
+        attr = 'name' if is_name_mode else 'ip'
+    
+        # We must block signals so the text change doesn't trigger 
+        # 'refresh_current_plot' 40 times in a row.
+        self.ip_list.blockSignals(True)
+    
+        # Correct way to iterate through a QListWidget
+        for i in range(self.ip_list.count()):
+            item = self.ip_list.item(i)
+        
+            # Get the hidden IP we stored in UserRole
+            ip_key = item.data(Qt.UserRole)    
+
+            # Look up the name in your server_list
+            found = False
+            for s in self.server_list:
+                if str(s['ip']) == str(ip_key):
+                    item.setText(str(s[attr]))
+                    found = True
+                    break
+        
+            if not found:
+                print(f"Warning: Could not find server data for IP {ip_key}")
+
+        self.ip_list.sortItems()
+        self.ip_list.blockSignals(False)
+    
+        # Force the UI to repaint
+        self.ip_list.update()
 
     def check_local_data_on_startup(self):
         """Ensures the first server is actually rendered on window open."""
@@ -3238,7 +3349,9 @@ class VisualizerReportWindow(QMainWindow):
         if not current_item:
             return
             
-        ip = current_item.text()
+#        ip = current_item.text()
+        ip = current_item.data(Qt.UserRole)
+
         if ip in self.data_cache:
             data_obj = self.data_cache[ip]
                         
@@ -3359,19 +3472,12 @@ class VisualizerReportWindow(QMainWindow):
 
         """Reads logs and creates a Global Total with reboot-resilient summing."""
 
-        existing_items = self.ip_list.findItems("---.---.---.---", Qt.MatchExactly)
-
-        # If it exists, remove it
-        if existing_items:
-            for item in existing_items:
-                row = self.ip_list.row(item)
-                self.ip_list.takeItem(row)
-
         self.data_cache.clear()
-        server_list = sorted(self.server_list, key=lambda x: x['ip'])
+        # Sort excluding the virtual IP for the file-reading phase
+        actual_servers = [s for s in self.server_list if s['ip'] != "---.---.---.---"]        
         
         all_epochs = []
-        for server in server_list:
+        for server in actual_servers:
             ip = server['ip']
             file_path = f"server_report_logs/{ip}.log"
             if os.path.exists(file_path):
@@ -3447,7 +3553,6 @@ class VisualizerReportWindow(QMainWindow):
             'epochs': total_epochs, 'clients': total_clients,
             'ups': total_ups, 'downs': total_downs
         }
-        self.ip_list.addItem("---.---.---.---")
 
 
     def parse_log_file(self, file_path):
