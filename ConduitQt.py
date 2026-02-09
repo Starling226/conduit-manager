@@ -34,15 +34,17 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
-#conduit_release = "pre_release"
-conduit_release = "official"
+conduit_release = "pre_release"
+#conduit_release = "official"
 
 if conduit_release == "official":
     CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
 else:
     CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
 
-APP_VERSION = "2.2.3"
+PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cil/psiphon_config.json.backup"
+
+APP_VERSION = "2.2.4"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -907,8 +909,11 @@ class DeployWorker(QThread):
                 conn.run(pkg_cmd, hide=True)
 
                 # 3. Download Binary
-                conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
-                conn.run("chmod +x /opt/conduit/conduit")
+                conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)           
+                conn.run("chmod +x /opt/conduit/conduit")                
+
+                if conduit_release == 'pre_release':
+                    conn.run(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 
                 # 4. Manually Create the Service File (Replacing 'service install')
                 service_content = f"""[Unit]
@@ -951,7 +956,7 @@ WantedBy=multi-user.target
                 conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = "0 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
@@ -1024,7 +1029,7 @@ WantedBy=multi-user.target
 
                 # 2. Cleanup & Stop (Only runs if version is different or binary missing)
                 self.log_signal.emit(f"[{s['ip']}] Upgrading {current_version} -> {version_tag}...")
-
+                
                 conn.run("systemctl stop conduit", warn=True, hide=True)
                 time.sleep(2)
                 conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
@@ -1034,10 +1039,11 @@ WantedBy=multi-user.target
                 conn.run("chmod +x /opt/conduit/conduit")
 
                 if conduit_release == 'pre_release':
+                    conn.run(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
                     cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
                     conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-                    conn.run("systemctl daemon-reload")
-                
+                    conn.run("systemctl daemon-reload")                    
+
                 if conduit_release != 'pre_release':
                     if self.params['update']:
                         cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
@@ -1046,7 +1052,7 @@ WantedBy=multi-user.target
                     conn.run("systemctl daemon-reload")
 
                 # 5. Start
-                conn.run("systemctl start conduit", hide=True)                
+                conn.run("systemctl start conduit", hide=True)      
                 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
@@ -1055,13 +1061,17 @@ WantedBy=multi-user.target
                 current_year = datetime.now().year
                 filename = f"/opt/conduit/{current_year}-conduit.log"
                 backup_log = f"/opt/conduit/{current_year}-conduit.log.bak"
+                
                 # Check if file exists (-f) then move (mv)
-                conn.run(f'[ -f {filename} ] && mv {filename} {backup_log}', hide=True)
-
-#                conn.run("mv /opt/conduit/2026-conduit.log /opt/conduit/2026-conduit.log.1")
+                result = conn.run(f'test -f {filename}', warn=True, hide=True)
+ 
+                if result.ok:
+                    conn.run(f'mv {filename} {backup_log}', hide=True)
+                else:
+                    print(f"Skipping backup: {filename} does not exist.")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = "0 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
@@ -1165,6 +1175,7 @@ class ConduitGUI(QMainWindow):
         self.chk_upd = QCheckBox("Apply Config Changes")
         self.chk_upd.setToolTip("Checked and Click on Re-Start (if server is running) or Start to update the Max Clients and Bandwidth")
         cfg_lay.addWidget(self.chk_upd)
+        self.chk_upd.setChecked(True)
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
         self.rad_name.setChecked(True)
@@ -3105,6 +3116,25 @@ class VisualizerReportWindow(QMainWindow):
             lbl.setFixedWidth(180)
             bottom_lay.addWidget(lbl)
 
+        bottom_lay.addWidget(QLabel("Traffic Mode "))
+        self.radio_total = QRadioButton("Total")
+        self.radio_instant = QRadioButton("Interval")
+        self.radio_instant.setChecked(True) # Default to your current delta view
+        
+        # Group them to ensure mutual exclusivity
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.radio_total)
+        self.mode_group.addButton(self.radio_instant)
+        
+        bottom_lay.addWidget(self.radio_total)
+        bottom_lay.addWidget(self.radio_instant)
+
+        self.radio_instant.setChecked(True)
+
+        self.radio_total.clicked.connect(self.refresh_current_plot)
+
+        self.radio_instant.clicked.connect(self.refresh_current_plot)  
+
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
         self.rad_ip.setChecked(True)
@@ -3317,9 +3347,8 @@ class VisualizerReportWindow(QMainWindow):
         self.status_label.setText("Sync Complete")
 
     def handle_selection_change(self, current, previous):
-        """Switching is now instantaneous because it uses self.data_cache."""
+        
         if not current: return
-        ip = current.text()
         
         # Check if the IP exists in our memory cache
         if ip in self.data_cache:
@@ -3338,7 +3367,10 @@ class VisualizerReportWindow(QMainWindow):
 
             # 2. PASS THE DICTIONARY, NOT THE IP STRING
 
-            self.plot_report_interval(data_obj, ip)   # Pass the object {}
+            if self.radio_total.isChecked():                        
+                self.plot_report_cumulative(data_obj, ip)
+            else:
+                self.plot_report_interval(data_obj, ip)
 
         else:
             self.status_label.setText("Last Sync: No Data in Cache")
@@ -3354,8 +3386,11 @@ class VisualizerReportWindow(QMainWindow):
 
         if ip in self.data_cache:
             data_obj = self.data_cache[ip]
-                        
-            self.plot_report_interval(data_obj, ip)
+            
+            if self.radio_total.isChecked():                        
+                self.plot_report_cumulative(data_obj, ip)
+            else:
+                self.plot_report_interval(data_obj, ip)
 
     def get_dynamic_scale(self, max_value):
         KB = 1024
@@ -3422,18 +3457,6 @@ class VisualizerReportWindow(QMainWindow):
         TB = 1024 * 1024 * 1024 * 1024
 
         divisor, unit = self.get_scale_unit(max_val)
-        '''
-        if max_val >= KB and max_val < MB:
-            divisor, unit = KB, "KBytes"
-        elif max_val >= MB and max_val < GB:
-            divisor, unit = MB, "MBytes"
-        elif max_val >= GB and max_val < TB:
-            divisor, unit = GB, "GBytes"
-        elif max_val >= TB:
-            divisor, unit = TB, "TBytes"
-        else:
-            divisor, unit = 1, "Bytes"
-        '''
 
         max_clients = max(data['clients'])
         total_up_bytes = sum(data['ups'])
@@ -3442,6 +3465,75 @@ class VisualizerReportWindow(QMainWindow):
         # 3. Scale the data arrays
         scaled_ups = [x / divisor for x in data['ups']]
         scaled_downs = [x / divisor for x in data['downs']]
+
+        # 4. Plot scaled data
+        self.p_clients.plot(data['epochs'], data['clients'], pen=pg.mkPen('#00d2ff', width=2), clear=True)
+        self.p_up.plot(data['epochs'], scaled_ups, pen=pg.mkPen('#3aeb34', width=2), clear=True)
+        self.p_down.plot(data['epochs'], scaled_downs, pen=pg.mkPen('#ff9f43', width=2), clear=True)
+
+        # 5. Update Titles/Labels to show the unit
+        if ip != "---.---.---.---":
+            self.p_clients.setTitle(f"Total Clients")
+            self.p_up.setTitle(f"Total Up ({unit})")            
+            self.p_down.setTitle(f"Total Down ({unit})")
+        else:
+            self.p_up.setTitle(f"Total Up - all servers ({unit})")
+            self.p_down.setTitle(f"Total Down - all servers ({unit})")
+            self.p_clients.setTitle(f"Total Clients - all servers")
+
+        for p in [self.p_clients, self.p_up, self.p_down]: 
+            p.enableAutoRange(axis='y')      
+
+        divisor_up, unit_up = self.get_scale_unit(total_up_bytes,)
+        divisor_down, unit_down = self.get_scale_unit(total_down_bytes)
+
+        self.lbl_total_clients.setText(f"Max Clients: {max_clients}")
+        self.lbl_total_up.setText(f"Total Up: {total_up_bytes/divisor_up:.1f} {unit_up}")
+        self.lbl_total_down.setText(f"Total Down: {total_down_bytes/divisor_down:.1f} {unit_down}") 
+
+    def plot_report_cumulative(self, data, ip):
+        """Plots total usage using cached memory data with dynamic units."""
+        # 1. Always clear first to ensure we don't overlay data
+        self.p_clients.clear()
+        self.p_up.clear()
+        self.p_down.clear()
+
+        epochs = data.get('epochs', [])
+        ups_array = np.array(data['ups'])
+        down_array = np.array(data['downs'])
+        ups_cumulative = np.cumsum(ups_array)
+        down_cumulative = np.cumsum(down_array)
+
+        # 2. Check for insufficient data
+        if len(epochs) < 2:
+            self.p_up.setTitle("Up (No Data)")
+            self.p_down.setTitle("Down (No Data)")
+            # Re-enable auto-range so it's ready for the next valid click
+            for p in [self.p_clients, self.p_up, self.p_down]:
+                p.enableAutoRange()
+            return
+        
+        # 1. Determine the scale based on the highest value in either Up or Down
+        max_up = max(0,ups_cumulative[-1])
+        max_down = max(0,down_cumulative[-1])
+        max_val = max(max_up, max_down)
+        
+        # 2. Apply your specific rules
+        KB = 1024
+        MB = 1024 * 1024
+        GB = 1024 * 1024 * 1024
+        TB = 1024 * 1024 * 1024 * 1024
+
+        divisor, unit = self.get_scale_unit(max_val)
+
+        max_clients = max(data['clients'])
+        total_up_bytes = ups_cumulative[-1]
+        total_down_bytes = down_cumulative[-1]
+
+        # 3. Scale the data arrays
+
+        scaled_ups = ups_cumulative / divisor
+        scaled_downs = down_cumulative / divisor
 
         # 4. Plot scaled data
         self.p_clients.plot(data['epochs'], data['clients'], pen=pg.mkPen('#00d2ff', width=2), clear=True)
