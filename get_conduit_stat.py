@@ -28,17 +28,18 @@ def parse_record(line):
         pattern = r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}).*?Clients:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
     match = re.search(pattern, line)
     if match:
-        if "Connecting" in line: return match.groups()
+        if "Connecting" in line:
+            return match.groups()
+
         return (f"{match.group(1)} {match.group(2)}", match.group(3), match.group(4), match.group(5))
     return None
-
+  
 def get_status():
     base_dir = "/opt/conduit"
     filename = os.path.join(base_dir, f"{datetime.now().year}-conduit.log")
     since = "'120 minutes ago'" if os.path.exists(filename) else f"'{datetime.now().year}-01-01 00:00:00'"
 
-    cmd = (f"journalctl -u conduit.service --since {since} --no-pager -o short-iso | "
-           f"grep '[STATS]' | sed 's/.*conduit\\[[0-9]*\\]: //'")
+    cmd = (f"journalctl -u conduit.service --since {since} --no-pager -o short-iso")
 
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
