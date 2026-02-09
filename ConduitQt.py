@@ -1069,11 +1069,14 @@ WantedBy=multi-user.target
                     conn.run(f'mv {filename} {backup_log}', hide=True)
                 else:
                     print(f"Skipping backup: {filename} does not exist.")
+                
 
+                '''
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
                 cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
+                '''
 
                 return f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}."
         except Exception as e:
@@ -2507,7 +2510,8 @@ class VisualizerWindow(QMainWindow):
 #        self.progress_bar.setFormat(f"Downloading")
         self.status_label.setText("Retrieving data started...")
         # This is where the actual 'Downloading' happens
-        self.worker = HistoryWorker(self.server_list, days)
+        server_list = [s for s in self.server_list if s.get("ip") != "---.---.---.---"]
+        self.worker = HistoryWorker(server_list, days)
         self.worker.progress.connect(self.update_progress_ui)
         self.worker.all_finished.connect(self.on_fetch_complete)
         self.worker.start()
@@ -2787,6 +2791,7 @@ class VisualizerWindow(QMainWindow):
             if os.path.exists(file_path):
                 data = self.parse_log_file(file_path)
                 self.data_cache[ip] = data
+                print(ip,len(data['epochs']))
                 if data['epochs']:
                     all_epochs.extend([data['epochs'][0], data['epochs'][-1]])
 
@@ -2831,14 +2836,26 @@ class VisualizerWindow(QMainWindow):
             total_ups.append(s_ups)
             total_downs.append(s_downs)
 
+        # 2. Create 1-minute (60s) grid
+        start_time = start_t
+        end_time = end_t
+        new_times = np.arange(start_time, end_time, 60)
+
+        # Interpolate values across the new grid
+        # np.interp is highly optimized for this
+
+        resampled_clients = np.interp(new_times, total_epochs, total_clients).round().astype(int).tolist()
+        resampled_ups = np.interp(new_times, total_epochs, total_ups).astype(int).tolist()
+        resampled_downs = np.interp(new_times, total_epochs, total_downs).astype(int).tolist()
+        new_times_list = new_times.tolist()
+
         # Assign calculated totals to the cache key used by the GUI
         self.data_cache["---.---.---.---"] = {
-            'epochs': total_epochs, 
-            'clients': total_clients,
-            'ups': total_ups, 
-            'downs': total_downs
-        }
-
+            'epochs': new_times_list, 
+            'clients': resampled_clients,
+            'ups': resampled_ups, 
+            'downs': resampled_downs
+        }        
 
     def fix_reboot_counters(self, raw_rows):
         """
@@ -3265,7 +3282,10 @@ class VisualizerReportWindow(QMainWindow):
 #        self.progress_bar.setFormat(f"Downloading")
         self.status_label.setText("Retrieving data started...")
         # This is where the actual 'Downloading' happens
-        self.worker = ReportWorker(self.server_list)
+
+        server_list = [s for s in self.server_list if s.get("ip") != "---.---.---.---"]
+
+        self.worker = ReportWorker(server_list)
         self.worker.progress.connect(self.update_progress_ui)
         self.worker.all_finished.connect(self.on_fetch_complete)
         self.worker.start()
@@ -3337,6 +3357,7 @@ class VisualizerReportWindow(QMainWindow):
         # 2. Load the newly cleaned data into the Memory Cache
         self.status_label.setText("Importing data...")
         self.load_all_logs_into_memory()
+        self.status_label.setText("Importing data finished")
         self.console.appendPlainText(f"Importing data finished.")
         # 3. Refresh the GUI
         self.progress_bar.setVisible(False)
@@ -3349,7 +3370,7 @@ class VisualizerReportWindow(QMainWindow):
     def handle_selection_change(self, current, previous):
         
         if not current: return
-        
+        ip = current.text()
         # Check if the IP exists in our memory cache
         if ip in self.data_cache:
             data_obj = self.data_cache[ip] # This is the dictionary
@@ -3640,12 +3661,27 @@ class VisualizerReportWindow(QMainWindow):
             total_ups.append(s_ups)
             total_downs.append(s_downs)
 
-        # 5. Assign to virtual IP
-        self.data_cache["---.---.---.---"] = {
-            'epochs': total_epochs, 'clients': total_clients,
-            'ups': total_ups, 'downs': total_downs
-        }
+        
+        # 2. Create 1-minute (3600s) grid
+        start_time = start_t
+        end_time = end_t
+        new_times = np.arange(start_time, end_time, 3600)
 
+        # Interpolate values across the new grid
+        # np.interp is highly optimized for this
+
+        resampled_clients = np.interp(new_times, total_epochs, total_clients).round().astype(int).tolist()
+        resampled_ups = np.interp(new_times, total_epochs, total_ups).astype(int).tolist()
+        resampled_downs = np.interp(new_times, total_epochs, total_downs).astype(int).tolist()
+        new_times_list = new_times.tolist()
+
+        # Assign calculated totals to the cache key used by the GUI
+        self.data_cache["---.---.---.---"] = {
+            'epochs': new_times_list, 
+            'clients': resampled_clients,
+            'ups': resampled_ups, 
+            'downs': resampled_downs
+        }                
 
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
