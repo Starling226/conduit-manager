@@ -4,10 +4,12 @@ import re
 import time
 import gzip
 import io
+import copy
 import platform
 import statistics
 import ipaddress
 import numpy as np
+import json
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -44,7 +46,7 @@ else:
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cil/psiphon_config.json.backup"
 
-APP_VERSION = "2.2.4"
+APP_VERSION = "2.3.0"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -72,7 +74,7 @@ class ReportFetcher(QRunnable):
 
             connect_kwargs = {
                 "key_filename": [key_path], 
-                "timeout": 10,
+                "timeout": 15,
                 "look_for_keys": False, 
                 "allow_agent": False  
             }
@@ -80,18 +82,23 @@ class ReportFetcher(QRunnable):
             with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
                 conn.run(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
                 
-                compressed_bytes = text_buffer.getvalue().encode('latin-1')
+                encoded_string = text_buffer.getvalue()
                 
-                if not compressed_bytes:
+                if not encoded_string:
                     print(f"FAILED: No data in {remote_path} for {ip}")
                     return
 
+                # Convert that string back to actual bytes using the same encoding
+                compressed_bytes = encoded_string.encode('latin-1')
+
+                # Decompress the raw bytes
                 raw_bytes = gzip.decompress(compressed_bytes)
+
                 decoded_text = raw_bytes.decode('utf-8')
 
-                os.makedirs("server_report_logs", exist_ok=True)
                 # Saving as .raw so the Visualizer knows it needs processing
-                with open(f"server_report_logs/{ip}.raw", "w") as f:
+
+                with open(f"server_report_logs/{ip}.raw", "w", encoding='utf-8') as f:
                     f.write(decoded_text)
                             
         except Exception as e:
@@ -133,22 +140,33 @@ class LogFetcher(QRunnable):
 
             connect_kwargs = {
                 "key_filename": [key_path], 
-                "timeout": 10,
+                "timeout": 15,
                 "look_for_keys": False,  # STOP searching ~/.ssh/ for other keys
                 "allow_agent": False     # STOP trying to talk to Pageant/ssh-agent
             }
 
 
             with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
+
+                # IMPORTANT: we specify latin-1 here so it maps bytes 1:1 to string characters
                 conn.run(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
-                compressed_bytes = text_buffer.getvalue().encode('latin-1')
-                if not compressed_bytes:
+
+#                compressed_bytes = text_buffer.getvalue().encode('latin-1')
+                # Retrieve the "stringified" bytes
+                encoded_string = text_buffer.getvalue()
+                if not encoded_string:
                     print(f"FAILED: server_logs/{ip}.raw")
                     return
 
+                # Convert that string back to actual bytes using the same encoding
+                compressed_bytes = encoded_string.encode('latin-1')
+
+                # Decompress the raw bytes
                 raw_bytes = gzip.decompress(compressed_bytes)
                 decoded_text = raw_bytes.decode('utf-8')
-                with open(f"server_logs/{ip}.raw", "w") as f:
+
+#                with open(f"server_logs/{ip}.raw", "w") as f:
+                with open(f"server_logs/{ip}.raw", "w", encoding='utf-8') as f:                    
                     f.write(decoded_text)
                 
                             
@@ -165,7 +183,6 @@ class LogFetcher(QRunnable):
             return int(float(number) * units.get(unit.upper(), 1))
         except:
             return 0
-
 
 class HistoryWorker(QThread):
     """Manages the pool of LogFetchers."""
@@ -213,8 +230,8 @@ class ReportWorker(QThread):
 #        self.completed_count = 0
 
     def run(self):
-        if not os.path.exists("server_logs"):
-            os.makedirs("server_logs")
+        if not os.path.exists("server_report_logs"):
+            os.makedirs("server_report_logs", exist_ok=True)
 
         pool = QThreadPool.globalInstance()
         # Set max threads to number of servers or a reasonable limit (e.g., 20)
@@ -256,7 +273,7 @@ class ServerDialog(QDialog):
 
         self.name_edit = QLineEdit(data['name'] if data else "")
         self.ip_edit = QLineEdit(data['ip'] if data else "")
-        self.port_edit = QLineEdit(data['port'] if data else "22")
+        self.port_edit = QLineEdit(str(data['port']) if data else "22")
         self.user_edit = QLineEdit(data['user'] if data else "root")
         self.pass_edit = QLineEdit(data['pass'] if data else "")
         self.pass_edit.setEchoMode(QLineEdit.Password)
@@ -363,7 +380,7 @@ class AutoStatsWorker(QThread):
 
                 # 2. If running, get the logs for the requested window
                 cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
-                result = conn.run(cmd, hide=True, timeout=12)
+                result = conn.run(cmd, hide=True, timeout=15)
                 output = result.stdout.strip()
 
                 if output:
@@ -509,9 +526,14 @@ class ServerWorker(QThread):
                     run_cmd("rm -rf /var/lib/conduit/*")
                     
                     # 3. Apply Config if requested
+
                     if self.config['update']:
-                        cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
-                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                        if conduit_release == 'pre_release':
+                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                        else:
+                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+
+                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service")
                         run_cmd("systemctl daemon-reload")
                     
                     # 4. Start service
@@ -524,13 +546,22 @@ class ServerWorker(QThread):
                     current_status = status_res.stdout.strip() if status_res.ok else "inactive"
                     current_status = f"[*] {s['name']} ({s['ip']}): { current_status.upper()}"
 
+                    remote_date_cmd = "date '+%Y-%m-%d %H:%M:%S'"
+                    result = run_cmd(remote_date_cmd)
+
+                    if result.ok:
+                        remote_time = result.stdout.strip()
+                        print(f"Remote Server Time: {remote_time}")
+                    else:
+                        remote_time = "00-00-00 00-00-00"
+
                     # 2. Get the last 5 lines of the journal
                     log_res = run_cmd("journalctl -u conduit.service -n 10 --no-pager")
                     journal_logs = log_res.stdout if log_res.ok else "No logs found."
 
                     # 3. Combine them for the UI
                     
-                    output = f"--- STATUS: {current_status} ---\n{get_conduit_stats()}\n{journal_logs}"
+                    output = f"--- STATUS: {current_status} ---\n{get_conduit_stats()}  current system time: {remote_time}\n{journal_logs}"
                     return output
 
                 service_file = "/etc/systemd/system/conduit.service"
@@ -541,7 +572,11 @@ class ServerWorker(QThread):
 
                 if self.action in ["start", "restart"]:
                     if self.config['update']:
-                        exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+                        if conduit_release == 'pre_release':
+                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                        else:
+                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+
                         sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
                         c.sudo(sed_cmd, hide=True)
                         c.sudo("systemctl daemon-reload", hide=True)
@@ -890,11 +925,11 @@ class DeployWorker(QThread):
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
 
                 # 1. Key Injection
-                '''
+                
                 conn.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh", hide=True)
                 conn.run(f'echo "{pub_key}" >> ~/.ssh/authorized_keys', hide=True)
                 conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
-                '''
+                
 
                 # 2. Cleanup & Directory Prep
                 conn.run("systemctl stop conduit", warn=True, hide=True)
@@ -904,6 +939,14 @@ class DeployWorker(QThread):
                 # Crucial: The service hardening requires this directory to exist beforehand
                 conn.run("rm -rf /var/lib/conduit", warn=True, hide=True)
                 conn.run("mkdir -p /var/lib/conduit", hide=True) 
+
+                # install system and network monitoring packages
+                if conn.run("command -v dnf", warn=True, hide=True).ok:
+                    conn.run("dnf install epel-release -y", hide=True)
+                    conn.run("dnf install tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
+                else:
+                    conn.run("apt-get update -y", hide=True)
+                    conn.run("apt-get install tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
 
                 pkg_cmd = "dnf install wget firewalld curl -y" if conn.run("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
                 conn.run(pkg_cmd, hide=True)
@@ -1094,9 +1137,10 @@ class ConduitGUI(QMainWindow):
         # Timer for Auto-Refresh
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.run_auto_stats)
-
+        self.server_data=[]
         self.init_ui()
-        self.check_initial_file()
+
+        self.load_servers_from_json()
 
     def init_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -1365,7 +1409,62 @@ class ConduitGUI(QMainWindow):
         self.btn_deploy.clicked.connect(self.run_deploy)
         self.btn_upgrade.clicked.connect(self.run_upgrade)
         
+        self.last_clicked_item = None
+#        self.pool.setObjectName("PoolList")
+#        self.sel.setObjectName("SelectionList")
+        # Connect the selection change to our debug method
+#        self.pool.itemClicked.connect(self.debug_selection)
+#        self.sel.itemClicked.connect(self.debug_selection)
+
+        self.pool.itemClicked.connect(self.handle_item_click)
+        self.sel.itemClicked.connect(self.handle_item_click)
+
+        self.pool.itemDoubleClicked.connect(self.edit_srv)
+        self.sel.itemDoubleClicked.connect(self.edit_srv)
+
         self.update_timer_interval() # Initialize timer
+
+    def handle_item_click(self, item):
+        """Updates tracker and ensures only one list has an active selection."""
+        self.last_clicked_item = item
+        
+        # Determine which list was NOT clicked and clear it
+        if item.listWidget() == self.pool:
+            self.sel.clearSelection()
+        else:
+            self.pool.clearSelection()
+            
+#        print(f"DEBUG: Now tracking: {item.text()}")
+
+    def handle_item_click2(self, item):
+        """Updates the global tracker whenever any list item is clicked."""
+        self.last_clicked_item = item
+        # Optional: Print to verify it's tracking the right one
+#        print(f"DEBUG: Last clicked is now: {item.text()}")
+
+    '''
+    def debug_selection(self):
+        """Prints the details of the selected item to the console."""
+        # Check both lists
+        sender = self.sender() # Identifies which list was clicked
+        it = sender.currentItem()
+        
+        if it:
+            name_or_ip_text = it.text()
+            hidden_ip = it.data(Qt.UserRole)
+            
+            # Find the actual dictionary in memory
+            data = self.find_data_by_item(it)
+            memory_name = data.get('name') if data else "NOT FOUND"
+            
+            print("--- SELECTION DEBUG ---")
+            print(f"Widget: {sender.objectName()}")
+            print(f"UI Text: {name_or_ip_text}")
+            print(f"Hidden IP (UserRole): {hidden_ip}")
+            print(f"Linked Memory Name: {memory_name}")
+            print("-----------------------")
+
+    '''
 
     def open_report(self):
         if not hasattr(self, 'rep_window'):
@@ -1692,7 +1791,7 @@ class ConduitGUI(QMainWindow):
         
         self.deploy_thread = DeployWorker("deploy",valid_targets, params)
         self.deploy_thread.log_signal.connect(lambda m: self.console.appendPlainText(m))
-        self.deploy_thread.remove_password_signal.connect(self.remove_password_from_file)
+#        self.deploy_thread.remove_password_signal.connect(self.remove_password_from_file)
         self.deploy_thread.finished.connect(lambda: self.btn_deploy.setEnabled(True))
         self.deploy_thread.finished.connect(lambda: self.btn_deploy.setText("Deploy"))
         
@@ -1846,11 +1945,13 @@ class ConduitGUI(QMainWindow):
         if reply == QMessageBox.Yes:
             self.run_worker("reset")
 
-    def create_item(self, s):
-        """Creates a list item with a hidden IP key."""
-        label = s['name'] if self.rad_name.isChecked() else s['ip']
-        item = QListWidgetItem(label)
-        item.setData(Qt.UserRole, s['ip']) 
+    def create_item(self, server_dict):
+        # Determine text based on current radio button mode
+        text = server_dict['name'] if self.rad_name.isChecked() else server_dict['ip']
+        item = QListWidgetItem(text)
+        
+        # This is what find_data_by_item looks for!
+        item.setData(Qt.UserRole, server_dict['ip']) 
         return item
 
     def sync_ui(self):
@@ -1899,40 +2000,78 @@ class ConduitGUI(QMainWindow):
             lw.sortItems()
 
     def find_data_by_item(self, item):
-        """
-        CRITICAL FIX: This method MUST use data(Qt.UserRole).
-        We ignore item.text() entirely because it changes based on radio buttons.
-        """
+        """Finds the dictionary in server_data matching the item's hidden IP."""
         if not item: 
             return None
             
-        # This is the hidden IP we stored during import/add
-        hidden_ip = item.data(Qt.UserRole)
+        search_ip = str(item.data(Qt.UserRole)).strip()
         
+        # DEBUG: Let's see what the UI thinks the IP is
+        # print(f"Searching for IP: {search_ip}")
+
         for s in self.server_data:
-            if s['ip'] == hidden_ip:
+            # We must ensure we are comparing strings to strings
+            if str(s.get('ip', '')).strip() == search_ip:
                 return s
+        
+        self.console.appendPlainText(f"[ERROR] No memory record found for IP: {search_ip}")
         return None
 
     def edit_srv(self):
-        """Edits selected server based on hidden IP key."""
-        it = self.pool.currentItem() or self.sel.currentItem()
+        """Edits the server that was most recently clicked."""
+
+        # 1. Count total selected items across both lists
+        total_selected = len(self.pool.selectedItems()) + len(self.sel.selectedItems())
+
+        if total_selected > 1:
+            QMessageBox.warning(self, "Selection Error", 
+                                f"You have {total_selected} servers selected.\n"
+                                "Please select only one server to edit.")
+            return
+
+        # 2. Use the tracker we updated during handle_item_click
+        it = self.last_clicked_item
+        
+        # 3. If nothing was clicked (e.g. app just started), then fallback
+        if not it:
+            it = self.pool.currentItem() or self.sel.currentItem()
+
+        # 4. Get the actual data
         data = self.find_data_by_item(it)
         if not data:
             QMessageBox.information(self, "Edit", "Please select a server first.")
             return
 
+#        print(f"EDITING: {data.get('name')} | IP: {data.get('ip')}")
+
         dlg = ServerDialog(self, data)
         if dlg.exec_() == QDialog.Accepted:
             new_info = dlg.get_data()
             
-            # If IP changed, we need to update the hidden key too
+            # Update the UI item and memory list
             it.setData(Qt.UserRole, new_info['ip'])
             data.update(new_info)
             
             self.save()
-            self.sync_ui() # Refresh all labels
+            self.sync_ui() 
             self.console.appendPlainText(f"[*] Updated: {new_info['name']}")
+
+    def remove_server_from_ui(self, ip_key):
+        """Removes a server from all UI components by its IP key."""
+        # 1. Remove from ListWidgets (pool and sel)
+        for lw in [self.pool, self.sel]:
+            for i in range(lw.count()):
+                it = lw.item(i)
+                if it and it.data(Qt.UserRole) == ip_key:
+                    lw.takeItem(i)
+                    break # Assuming one instance per ListWidget
+
+        # 2. Remove from stats_table
+        for row in range(self.stats_table.rowCount()):
+            item = self.stats_table.item(row, 0)
+            if item and item.data(Qt.UserRole) == ip_key:
+                self.stats_table.removeRow(row)
+                break
 
     def delete_srv(self):
         """Deletes selected servers using hidden IP key to ensure accuracy."""
@@ -1941,14 +2080,18 @@ class ConduitGUI(QMainWindow):
 
         if QMessageBox.warning(self, "Delete", f"Delete {len(its)} server(s)?", 
                                QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
-            for it in its:
-                ip_key = it.data(Qt.UserRole)
-                # Remove from UI
-                it.listWidget().takeItem(it.listWidget().row(it))
+
+            # Create a list of IPs to delete first (to avoid index shifting issues)
+            ips_to_delete = [it.data(Qt.UserRole) for it in its]
+
+            for ip_key in ips_to_delete:
                 # Remove from Memory
                 self.server_data = [s for s in self.server_data if s['ip'] != ip_key]
+                # Remove from all UI elements
+                self.remove_server_from_ui(ip_key)
             
             self.save()
+            self.sync_ui() # Refresh all labels
             self.console.appendPlainText(f"[-] Deleted {len(its)} server(s).")
 
     # --- Standard File/List Handlers ---
@@ -1960,37 +2103,7 @@ class ConduitGUI(QMainWindow):
             self.server_data = []
             self.pool.clear()
             self.sel.clear()
-            
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                    # Skip the header line
-                    for line in lines[1:]:
-                        line = line.strip()
-                        if not line: continue # Skip empty lines
-                        
-                        parts = [p.strip() for p in line.split(',')]
-                        
-                        # Handle 4 parameters (name, ip, port, user) 
-                        # or 5 parameters (name, ip, port, user, pass)
-                        if len(parts) >= 4:
-                            d = {
-                                "name": parts[0],
-                                "ip":   parts[1],
-                                "port": parts[2],
-                                "user": parts[3],
-                                "pass": parts[4] if len(parts) > 4 else "" # Empty if 5th param missing
-                            }
-                            self.server_data.append(d)
-                            print(parts[0])
-                            self.pool.addItem(self.create_item(d))
-                
-                self.pool.sortItems()
-                self.lbl_path.setText(os.path.basename(path))
-                self.console.appendPlainText(f"[*] Successfully imported {len(self.server_data)} servers.")
-            
-            except Exception as e:
-                QMessageBox.critical(self, "Import Error", f"Failed to read file: {str(e)}")
+            self.load_from_file(self.current_path)
 
     def move_to_sel(self):
         for it in self.pool.selectedItems():
@@ -2010,6 +2123,13 @@ class ConduitGUI(QMainWindow):
             return True
         except ValueError:
             return False
+
+    def format_placeholder_cell(self, row, col):
+        """Standardizes the look of empty/N/A cells."""
+        placeholder = QTableWidgetItem("N/A")
+        placeholder.setForeground(QColor("gray"))
+        placeholder.setTextAlignment(Qt.AlignCenter)
+        self.stats_table.setItem(row, col, placeholder)
 
     def add_srv(self):
         dlg = ServerDialog(self)
@@ -2046,27 +2166,73 @@ class ConduitGUI(QMainWindow):
                 return
 
             # If all checks pass:
+
+            # 1. Update Memory
             self.server_data.append(d)
-            self.pool.addItem(self.create_item(d))
-            self.save()
+
+            # 2. Update ListWidgets
+            new_list_item = self.create_item(d)
+            # FORCE the UserRole here just in case create_item missed it
+            new_list_item.setData(Qt.UserRole, d['ip']) 
+            self.pool.addItem(new_list_item)                        
+            
+            # 3. Update Table
+            row_position = self.stats_table.rowCount()
+            self.stats_table.insertRow(row_position)
+
+            # Create the item for the first column and set the IP as UserRole
+            item = QTableWidgetItem(d['name'] if self.rad_name.isChecked() else d['ip'])
+            item.setData(Qt.UserRole, d['ip'])
+            self.stats_table.setItem(row_position, 0, item)
+
+            for col in range(1, self.stats_table.columnCount()):
+                self.format_placeholder_cell(row_position, col)
+
+            # Sort the UI
             self.pool.sortItems()
+
+            # Select the item we just added so "Edit" knows which one it is
+            self.pool.setCurrentItem(new_list_item)
+
+            self.sync_ui() # Refresh all labels
+
+            self.save()
             self.console.appendPlainText(f"[OK] Added server: {name}")
 
     def save(self):
-        if not self.current_path: 
-            # If path is missing, default to servers.txt so saving works
-            self.current_path = "servers.txt"
+        # 1. Determine the path (default to servers.json)
+        if not self.current_path or self.current_path.endswith('.txt'): 
+            self.current_path = "servers.json"
         
-        # Update the UI label to show the filename
-        # This fixes the "No file loaded" issue immediately after adding the first server
         self.lbl_path.setText(f"File: {os.path.basename(self.current_path)}")
 
+        # 2. Check for Duplicate IPs
+        seen_ips = set()
+        for s in self.server_data:
+            ip = s.get('ip', '').strip()
+            if ip in seen_ips:
+                QMessageBox.warning(None, "Duplicate IP", f"The IP address {ip} is already in the list.")
+                return
+            seen_ips.add(ip)
+
+        # 3. Save to JSON
         try:
+            # We want to save the entire list of dictionaries
+            # mapping 'pass' from your data to 'password' for the JSON format
+            output_data = []
+            for s in self.server_data:
+                entry = {
+                    "server": s.get('name', ''),
+                    "ip": s.get('ip', ''),
+                    "port": int(s.get("port", 22)) if s.get("port") else 22,
+                    "user": s.get('user', ''),
+                    "password": s.get('pass', '')  # Standardizing to 'password'
+                }
+                output_data.append(entry)
+
             with open(self.current_path, 'w') as f:
-                f.write("name, ip, port, user, password\n")
-                for s in self.server_data:
-                    # Using .get() prevents crashes if a key is missing
-                    f.write(f"{s.get('name','')}, {s.get('ip','')}, {s.get('port','')}, {s.get('user','')}, {s.get('pass','')}\n")
+                json.dump(output_data, f, indent=4)
+                
             self.console.appendPlainText(f"[OK] Changes saved to {self.current_path}")
         except Exception as e:
             self.console.appendPlainText(f"[ERROR] Save failed: {e}")
@@ -2104,19 +2270,6 @@ class ConduitGUI(QMainWindow):
         self.worker.log_signal.connect(lambda m: self.console.appendPlainText(m))
         self.worker.start()
 
-    def check_initial_file(self):
-        # We define our standard filename
-        filename = "servers.txt"
-        self.current_path = filename 
-
-        if os.path.exists(filename):
-            self.lbl_path.setText(f"File: {filename}")
-            self.console.appendPlainText(f"[INFO] Found '{filename}' in current directory. Importing...")
-            self.load_from_file(filename)
-        else:
-            self.lbl_path.setText("File: servers.txt (New)")
-            self.console.appendPlainText("[NOTICE] No 'servers.txt' found. Your first server will create this file.")
-
     def remove_password_from_file(self,target_ip):
         filename = "servers.txt"
         if not os.path.exists(filename):
@@ -2134,12 +2287,12 @@ class ConduitGUI(QMainWindow):
                 # Basic requirement: name, ip, port, user
                 if len(parts) >= 4:
                     # 1. IP Validation
-                    if not self.is_valid_ip(parts[1]):
+                    if not self.is_valid_ip(parts[1].strip()):
                         continue
 
                     # 2. Port Validation
                     try:
-                        port_num = int(parts[2])
+                        port_num = int(parts[2].strip())
                         if not (1 <= port_num <= 65535):
                             raise ValueError
                     except ValueError:
@@ -2149,7 +2302,7 @@ class ConduitGUI(QMainWindow):
                     if parts[3] == "root":
                         # Reconstruct line without the password
                         # Format: name, ip, port, user, 
-                        new_line = f"{parts[0]}, {parts[1]}, {parts[2]}, {parts[3]}, "
+                        new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, "
                         updated_lines.append(new_line)
                     else:
                         updated_lines.append(line)
@@ -2176,12 +2329,12 @@ class ConduitGUI(QMainWindow):
                 if len(parts) < 5: continue
 
                 # 1. IP Validation
-                if not self.is_valid_ip(parts[1]):
+                if not self.is_valid_ip(parts[1].strip()):
                     continue
 
                 # 2. Port Validation
                 try:
-                    port_num = int(parts[2])
+                    port_num = int(parts[2].strip())
                     if not (1 <= port_num <= 65535):
                         raise ValueError
                 except ValueError:
@@ -2189,7 +2342,7 @@ class ConduitGUI(QMainWindow):
 
                 if parts[1] == target_ip:
                     if parts[3] == "root":
-                        return parts[3],parts[4]
+                        return parts[3].strip(),parts[4].strip()
                     else:
                         return "", ""
 
@@ -2197,56 +2350,310 @@ class ConduitGUI(QMainWindow):
 
     def load_from_file(self, path):
         try:
-
             self.server_data.clear()
-            self.pool.clear() 
+            self.pool.clear()
 
-            with open(path, 'r') as f:
-                for line in f:
+            # Track IP → (line_number, server_name) for duplicate detection
+            ip_seen = {}          # ip → first line number where it appeared
+            ip_server_map = {}    # ip → first server name (for nicer warning)
+
+            with open(path, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f, start=1):  # line numbers start at 1
                     line = line.strip()
-                    if not line: continue # Handle comments/empty lines
-                    
+                    if not line or line.startswith('#'):  # skip empty lines & comments
+                        continue
+
                     parts = [p.strip() for p in line.split(',')]
+                    if len(parts) < 4:
+                        self.console.appendPlainText(
+                            f"[NOTICE] Line {i}: too few fields ({len(parts)}), skipped."
+                        )
+                        continue
 
-                    # Basic requirement: name, ip, port, user
-                    if len(parts) >= 4:
-                        # 1. IP Validation
-                        if not self.is_valid_ip(parts[1]):
-                            self.console.appendPlainText(f"[NOTICE] {parts[1]} is not a correct IP address. server {parts[0]} skipped.")
-                            continue
+                    server_name = parts[0].strip()
+                    ip = parts[1].strip()
 
-                        # 2. Port Validation
-                        try:
-                            port_num = int(parts[2])
-                            if not (1 <= port_num <= 65535):
-                                raise ValueError
-                        except ValueError:
-                            self.console.appendPlainText(f"[NOTICE] Invalid Port {parts[2]} for {parts[0]}. Skipped.")
-                            continue
+                    # 1. IP Validation
+                    if not self.is_valid_ip(ip):
+                        self.console.appendPlainText(
+                            f"[NOTICE] Line {i}: '{ip}' is not a valid IP address. Server '{server_name}' skipped."
+                        )
+                        continue
 
-                        # 3. Create Dictionary with Safe Password Check
-                        d = {
-                            'name': parts[0], 
-                            'ip': parts[1], 
-                            'port': str(port_num), # Keep as string for Fabric
-                            'user': parts[3], 
-                            'pass': parts[4] if len(parts) > 4 else ''
-                        }   
+                    # 2. Port Validation
+                    try:
+                        port_num = int(parts[2].strip())
+                        if not (1 <= port_num <= 65535):
+                            raise ValueError
+                    except ValueError:
+                        self.console.appendPlainText(
+                            f"[NOTICE] Line {i}: Invalid port '{parts[2]}' for '{server_name}'. Skipped."
+                        )
+                        continue
 
-                        self.server_data.append(d)
-                        self.pool.addItem(self.create_item(d))
-            
+                    # 3. Duplicate IP check
+                    if ip in ip_seen:
+                        first_line = ip_seen[ip]
+                        first_server = ip_server_map[ip]
+                        self.console.appendPlainText(
+                            f"[WARNING] Line {i}: Duplicate IP address '{ip}' "
+                            f"(already used by '{first_server}' on line {first_line}). "
+                            f"Server '{server_name}' skipped."
+                        )
+                        continue
+                    else:
+                        # Record first occurrence
+                        ip_seen[ip] = i
+                        ip_server_map[ip] = server_name
+
+                    # 4. Create entry
+                    d = {
+                        'name': server_name,
+                        'ip': ip,
+                        'port': str(port_num),  # string – good for fabric/invoke
+                        'user': parts[3].strip(),
+                        'pass': parts[4].strip() if len(parts) > 4 else ''
+                    }
+
+                    self.server_data.append(d)
+                    self.pool.addItem(self.create_item(d))
+
             self.pool.sortItems()
-            self.console.appendPlainText(f"[SUCCESS] {len(self.server_data)} servers imported.")
+
+            count = len(self.server_data)
+            self.console.appendPlainText(f"[*] Successfully imported {len(self.server_data)} servers.")
+#            self.console.appendPlainText(
+#                f"[SUCCESS] {count} server{'s' if count != 1 else ''} imported."
+#            )
+
+            # Optional: still convert to JSON (now only contains valid + non-duplicate entries)
+            self.convert_to_json(input_file=path)
+            self.lbl_path.setText(os.path.basename('servers.json'))
+
+        except FileNotFoundError:
+            self.console.appendPlainText(f"[ERROR] File not found: {path}")
+            QMessageBox.critical(self, "Import Error", f"[ERROR] File not found: {path}")
         except Exception as e:
             self.console.appendPlainText(f"[ERROR] Could not read file: {e}")
+            QMessageBox.critical(self, "Import Error", f"[ERROR] Could not read file: {str(e)}")
+
+    def load_servers_from_json(self, json_file='servers.json'):
+        """Loads data and strictly prevents duplicate IPs from entering memory."""
+        # 1. Reset everything
+        self.server_data = []
+        self.pool.clear()
+        self.sel.clear()
+        self.stats_table.setRowCount(0)
+        
+        # Track IPs we've already processed in this load session
+        seen_ips = set()
+
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            for item in data:
+                # 2. Extract and Normalize
+                s_ip = item.get("ip", "").strip()
+                if not s_ip:
+                    continue
+
+                # --- THE DUPLICATE FILTER ---
+                if s_ip in seen_ips:
+                    self.console.appendPlainText(f"[SKIP] Duplicate IP found in file: {s_ip}")
+                    continue
+                # ----------------------------
+
+                s_name = item.get("server", item.get("name", "")).strip()
+                s_pass = item.get("password", item.get("pass", ""))
+                s_port = str(item.get("port", "22"))
+                s_user = item.get("user", "root")
+
+                entry = {
+                    "name": s_name,
+                    "ip": s_ip,
+                    "port": s_port,
+                    "user": s_user,
+                    "pass": s_pass
+                }
+
+                # 3. Add to Memory and Seen Set
+                self.server_data.append(entry)
+                seen_ips.add(s_ip)
+
+                # 4. Update UI Items
+                # Pool List
+                list_item = QListWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
+                list_item.setData(Qt.UserRole, s_ip)
+                self.pool.addItem(list_item)
+
+                # Table
+                row = self.stats_table.rowCount()
+                self.stats_table.insertRow(row)
+                t_item = QTableWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
+                t_item.setData(Qt.UserRole, s_ip)
+                self.stats_table.setItem(row, 0, t_item)
+                
+                for col in range(1, self.stats_table.columnCount()):
+                    self.format_placeholder_cell(row, col)
+
+            self.pool.sortItems()
+            self.console.appendPlainText(f"[OK] {len(self.server_data)} unique servers loaded.")
+            
+        except Exception as e:
+            self.console.appendPlainText(f"[ERROR] Load failed: {e}")
+
+    def load_servers_from_json3(self, json_file='servers.json'):
+        # 1. Complete Reset
+        self.server_data = []
+        self.pool.clear()
+        self.sel.clear()
+        self.stats_table.setRowCount(0)
+
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            for item in data:
+                # 2. Strict Mapping
+                # We extract values locally so there is no confusion
+                s_name = item.get("server", item.get("name", "")).strip()
+                s_ip = item.get("ip", "").strip()
+                s_pass = item.get("password", item.get("pass", ""))
+                s_port = str(item.get("port", "22"))
+                s_user = item.get("user", "root")
+
+                entry = {
+                    "name": s_name,
+                    "ip": s_ip,
+                    "port": s_port,
+                    "user": s_user,
+                    "pass": s_pass
+                }
+
+                # 3. Update Memory
+                self.server_data.append(entry)
+
+                # 4. Create UI Item (Pass the specific local 'entry')
+                # We don't use 'item' or 'server_entry' from the outer scope
+                list_item = QListWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
+                list_item.setData(Qt.UserRole, s_ip)
+                self.pool.addItem(list_item)
+
+                # 5. Update Table
+                row = self.stats_table.rowCount()
+                self.stats_table.insertRow(row)
+                t_item = QTableWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
+                t_item.setData(Qt.UserRole, s_ip)
+                self.stats_table.setItem(row, 0, t_item)
+                
+                for col in range(1, self.stats_table.columnCount()):
+                    self.format_placeholder_cell(row, col)
+
+            self.pool.sortItems()
+            self.console.appendPlainText(f"[OK] Loaded {len(self.server_data)} servers.")
+            
+        except Exception as e:
+            self.console.appendPlainText(f"[ERROR] Load failed: {e}")
+
+    def load_servers_from_json2(self, json_file='servers.json'):
+        """Loads server data from a JSON file into a list of dictionaries."""
+
+        # Clear existing data to prevent duplicates in memory
+        self.server_data = []
+        self.pool.clear()
+        self.sel.clear()
+        self.stats_table.setRowCount(0)
+
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            # Expecting a list of dicts
+            if not isinstance(data, list):
+                raise ValueError("JSON root must be a list of server objects")
+                
+            for item in data:
+                # Minimal validation + normalization
+                if not isinstance(item, dict):
+                    continue
+                    
+                server_entry = {
+                    "name":  item.get("server",  item.get("name",   "")),
+                    "ip":      item.get("ip",      ""),
+                    "port":    int(item.get("port", 22)) if item.get("port") else 22,
+                    "user":    item.get("user",    ""),
+                    "pass": item.get("password", item.get("pass", ""))
+                }
+                
+                # Alternative Fabric-style variant (uncomment if you prefer this shape)
+                # server_entry = {
+                #     'name':     item.get("server", item.get("name", "")),
+                #     'ip':       item.get("ip", ""),
+                #     'port':     str(item.get("port", 22)),   # string – common for Fabric/Invoke
+                #     'user':     item.get("user", ""),
+                #     'pass':     item.get("password", item.get("pass", ""))
+                # }
+                
+                self.server_data.append(server_entry)
+                self.pool.addItem(self.create_item(server_entry))
+
+                # If you're using a UI / pool like in your second snippet:
+                # self.server_data.append(server_entry)
+                # self.pool.addItem(self.create_item(server_entry))
+            
+            print(f"Successfully loaded {len(self.server_data)} servers from {json_file}")
+            self.pool.sortItems()
+            self.console.appendPlainText(f"[SUCCESS] {len(self.server_data)} servers imported.")
+            self.lbl_path.setText(os.path.basename(json_file))
+            
+        except FileNotFoundError:
+            self.console.appendPlainText(f"File not found: {json_file}.\n"
+                "Please import servers.txt file. Add each server in a row using this format:\n"
+                "server name, IP Address, port number, root, password\n"
+                "Please leave root as it is. You must add password for the root user.\n"
+                "Otherwise, you can add individual servers by clicking on Add Server (+) Button")
+            return []
+        except json.JSONDecodeError as e:
+            self.console.appendPlainText(f"Invalid JSON format in {json_file}: {e}")
+            return []
+        except Exception as e:
+            self.console.appendPlainText(f"Error loading servers: {e}")
+            return []
+
+    def convert_to_json(self, input_file='servers.txt', output_file='servers.json'):
+        """Converts comma-separated server data to a formatted JSON file."""
+        servers_list = []
+        try:
+            with open(input_file, 'r') as f:
+                for line in f:
+                    data = line.strip().split(',')
+                    if len(data) == 5:
+                        server_entry = {
+                            "server": data[0].strip(),
+                            "ip": data[1].strip(),
+                            "port": int(data[2].strip()),
+                            "user": data[3].strip(),
+                            "password": data[4].strip()
+                        }
+                        servers_list.append(server_entry)
+
+            with open(output_file, 'w') as json_f:
+                json.dump(servers_list, json_f, indent=4)
+            
+            self.console.appendPlainText(f"Successfully exported {len(servers_list)} servers.")
+            return True
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return False
+
 
 class VisualizerWindow(QMainWindow):
     def __init__(self, server_list, console):
         super().__init__()
-        self.setWindowTitle("Conduit Analytics Visualizer")
+        self.setWindowTitle("Conduit Network Traffic Analytics")
         self.resize(1400, 850)
-        self.server_list = server_list
+        self.server_list = copy.deepcopy(server_list)
 
         d = {
             "name": "---TOTAL---",
@@ -2351,9 +2758,12 @@ class VisualizerWindow(QMainWindow):
         
 # --- PLOT MODE SELECTION (Radio Buttons) ---
 #        mode_group_box = QGroupBox("Plot Mode")
-#        mode_layout = QHBoxLayout()
-        
-        bottom_lay.addWidget(QLabel("Traffic Mode "))
+#        mode_layout = QHBoxLayout()        
+
+        Traffic_lb = QLabel("Traffic Mode ")
+        Traffic_lb.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        bottom_lay.addWidget(Traffic_lb)
+
         self.radio_total = QRadioButton("Total")
         self.radio_instant = QRadioButton("Interval")
         self.radio_instant.setChecked(True) # Default to your current delta view
@@ -2376,6 +2786,10 @@ class VisualizerWindow(QMainWindow):
         self.radio_total.clicked.connect(self.refresh_current_plot)
 
         self.radio_instant.clicked.connect(self.refresh_current_plot)
+
+        Display_lb = QLabel("Display Mode ")
+        Display_lb.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        bottom_lay.addWidget(Display_lb)
 
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
@@ -2503,6 +2917,7 @@ class VisualizerWindow(QMainWindow):
         self.allow_network = True  # Enable network mode
         self.set_status_color("dark") # Change color to dark as requested
         
+        os.makedirs("server_logs", exist_ok=True)
         days = self.edit_days.text()
         self.btn_reload.setEnabled(False)
 #        self.progress_bar.setVisible(True)
@@ -2850,11 +3265,12 @@ class VisualizerWindow(QMainWindow):
         new_times_list = new_times.tolist()
 
         # Assign calculated totals to the cache key used by the GUI
+        # Slicing [1:] skips index 0 (the first element)
         self.data_cache["---.---.---.---"] = {
-            'epochs': new_times_list, 
-            'clients': resampled_clients,
-            'ups': resampled_ups, 
-            'downs': resampled_downs
+            'epochs': new_times_list[1:], 
+            'clients': resampled_clients[1:],
+            'ups': resampled_ups[1:], 
+            'downs': resampled_downs[1:]
         }        
 
     def fix_reboot_counters(self, raw_rows):
@@ -3019,9 +3435,9 @@ class VisualizerWindow(QMainWindow):
 class VisualizerReportWindow(QMainWindow):
     def __init__(self, server_list, console):
         super().__init__()
-        self.setWindowTitle("Conduit Analytics Report")
+        self.setWindowTitle("Conduit Hourly Report Analytics")
         self.resize(1400, 850)
-        self.server_list = server_list
+        self.server_list = copy.deepcopy(server_list)
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
         
@@ -3133,7 +3549,10 @@ class VisualizerReportWindow(QMainWindow):
             lbl.setFixedWidth(180)
             bottom_lay.addWidget(lbl)
 
-        bottom_lay.addWidget(QLabel("Traffic Mode "))
+        Traffic_lb = QLabel("Traffic Mode ")
+        Traffic_lb.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        bottom_lay.addWidget(Traffic_lb)
+        
         self.radio_total = QRadioButton("Total")
         self.radio_instant = QRadioButton("Interval")
         self.radio_instant.setChecked(True) # Default to your current delta view
@@ -3151,6 +3570,10 @@ class VisualizerReportWindow(QMainWindow):
         self.radio_total.clicked.connect(self.refresh_current_plot)
 
         self.radio_instant.clicked.connect(self.refresh_current_plot)  
+
+        Display_lb = QLabel("Display Mode ")
+        Display_lb.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        bottom_lay.addWidget(Display_lb)
 
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
