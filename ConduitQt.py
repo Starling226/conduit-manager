@@ -2099,6 +2099,23 @@ class ConduitGUI(QMainWindow):
     def import_srv(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Text (*.txt)")
         if path:
+
+            # Check if servers.json already exists
+            output_file = 'servers.json'
+            if os.path.exists(output_file):
+                reply = QMessageBox.question(
+                    self, 
+                    'File Exists',
+                    f"The file '{output_file}' already exists. Do you want to overwrite it?",
+                    QMessageBox.Yes | QMessageBox.No, 
+                    QMessageBox.No
+                )
+
+                # If the user clicks 'No', stop the process and return
+                if reply == QMessageBox.No:
+                    self.console.appendPlainText("[CANCEL] import aborted by user.")
+                    return
+
             self.current_path = path
             self.server_data = []
             self.pool.clear()
@@ -2349,6 +2366,7 @@ class ConduitGUI(QMainWindow):
         return "", ""
 
     def load_from_file(self, path):
+
         try:
             self.server_data.clear()
             self.pool.clear()
@@ -2499,131 +2517,16 @@ class ConduitGUI(QMainWindow):
 
             self.pool.sortItems()
             self.console.appendPlainText(f"[OK] {len(self.server_data)} unique servers loaded.")
+            self.lbl_path.setText(os.path.basename('servers.json'))
             
         except Exception as e:
             self.console.appendPlainText(f"[ERROR] Load failed: {e}")
-
-    def load_servers_from_json3(self, json_file='servers.json'):
-        # 1. Complete Reset
-        self.server_data = []
-        self.pool.clear()
-        self.sel.clear()
-        self.stats_table.setRowCount(0)
-
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            for item in data:
-                # 2. Strict Mapping
-                # We extract values locally so there is no confusion
-                s_name = item.get("server", item.get("name", "")).strip()
-                s_ip = item.get("ip", "").strip()
-                s_pass = item.get("password", item.get("pass", ""))
-                s_port = str(item.get("port", "22"))
-                s_user = item.get("user", "root")
-
-                entry = {
-                    "name": s_name,
-                    "ip": s_ip,
-                    "port": s_port,
-                    "user": s_user,
-                    "pass": s_pass
-                }
-
-                # 3. Update Memory
-                self.server_data.append(entry)
-
-                # 4. Create UI Item (Pass the specific local 'entry')
-                # We don't use 'item' or 'server_entry' from the outer scope
-                list_item = QListWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
-                list_item.setData(Qt.UserRole, s_ip)
-                self.pool.addItem(list_item)
-
-                # 5. Update Table
-                row = self.stats_table.rowCount()
-                self.stats_table.insertRow(row)
-                t_item = QTableWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
-                t_item.setData(Qt.UserRole, s_ip)
-                self.stats_table.setItem(row, 0, t_item)
-                
-                for col in range(1, self.stats_table.columnCount()):
-                    self.format_placeholder_cell(row, col)
-
-            self.pool.sortItems()
-            self.console.appendPlainText(f"[OK] Loaded {len(self.server_data)} servers.")
-            
-        except Exception as e:
-            self.console.appendPlainText(f"[ERROR] Load failed: {e}")
-
-    def load_servers_from_json2(self, json_file='servers.json'):
-        """Loads server data from a JSON file into a list of dictionaries."""
-
-        # Clear existing data to prevent duplicates in memory
-        self.server_data = []
-        self.pool.clear()
-        self.sel.clear()
-        self.stats_table.setRowCount(0)
-
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-            # Expecting a list of dicts
-            if not isinstance(data, list):
-                raise ValueError("JSON root must be a list of server objects")
-                
-            for item in data:
-                # Minimal validation + normalization
-                if not isinstance(item, dict):
-                    continue
-                    
-                server_entry = {
-                    "name":  item.get("server",  item.get("name",   "")),
-                    "ip":      item.get("ip",      ""),
-                    "port":    int(item.get("port", 22)) if item.get("port") else 22,
-                    "user":    item.get("user",    ""),
-                    "pass": item.get("password", item.get("pass", ""))
-                }
-                
-                # Alternative Fabric-style variant (uncomment if you prefer this shape)
-                # server_entry = {
-                #     'name':     item.get("server", item.get("name", "")),
-                #     'ip':       item.get("ip", ""),
-                #     'port':     str(item.get("port", 22)),   # string – common for Fabric/Invoke
-                #     'user':     item.get("user", ""),
-                #     'pass':     item.get("password", item.get("pass", ""))
-                # }
-                
-                self.server_data.append(server_entry)
-                self.pool.addItem(self.create_item(server_entry))
-
-                # If you're using a UI / pool like in your second snippet:
-                # self.server_data.append(server_entry)
-                # self.pool.addItem(self.create_item(server_entry))
-            
-            print(f"Successfully loaded {len(self.server_data)} servers from {json_file}")
-            self.pool.sortItems()
-            self.console.appendPlainText(f"[SUCCESS] {len(self.server_data)} servers imported.")
-            self.lbl_path.setText(os.path.basename(json_file))
-            
-        except FileNotFoundError:
-            self.console.appendPlainText(f"File not found: {json_file}.\n"
-                "Please import servers.txt file. Add each server in a row using this format:\n"
-                "server name, IP Address, port number, root, password\n"
-                "Please leave root as it is. You must add password for the root user.\n"
-                "Otherwise, you can add individual servers by clicking on Add Server (+) Button")
-            return []
-        except json.JSONDecodeError as e:
-            self.console.appendPlainText(f"Invalid JSON format in {json_file}: {e}")
-            return []
-        except Exception as e:
-            self.console.appendPlainText(f"Error loading servers: {e}")
-            return []
 
     def convert_to_json(self, input_file='servers.txt', output_file='servers.json'):
         """Converts comma-separated server data to a formatted JSON file."""
+
         servers_list = []
+
         try:
             with open(input_file, 'r') as f:
                 for line in f:
