@@ -82,7 +82,7 @@ To run ConduitQt.py, simply double click on or run them in the command line term
 The Start, Stop, Re-Start, Reset, Status, Upgrade, Deploy allows you to manage your servers efficiently. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and get clients.
 
 ### Using servers.txt
-For the Management and Monitoring scripts to work with multiple servers, create a `servers.txt` file in the same directory that you run any of the scripts. Upon successfull deployment the ssh public key will be injected to the server and root password will be removed from servers.txt. You must add root server for deployment if you plan to deploy mutiple servers simultaneouly. If you plan to deploy single server through the GUI applcation you will be prompted to enter the root password. Any comunication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22.
+For the Management and Monitoring, you need to create a `servers.txt` file in the same directory that you run `ConduitQt.py`. After importing the servers.text, it will be automatically converted into `servers.json`. The next time you launch the application, it imports `servers.json` automatically. `servers.json` must be available in the directory you launch the `ConduitQt.py`. You can add, delete, or update the individual server profile within the GUI. If you import `servers.txt` later, it will overwrite the existing `servers.json`. Upon successfull deployment the ssh public key will be injected to the server. You must add root server for deployment and other processes. Communication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22.
 
 **Format:**
 `name,hostname,port,username,password`. Do not add this header to servers.txt.
@@ -127,7 +127,7 @@ After installation, the Psiphon network requires time for vetting and propagatio
 
 ## Important Notes
 * **SSH Port:** These scripts use the standard **SSH Port 22** for all connections.
-* **Security Warning:** The `servers.txt` file contains plain-text passwords. **DO NOT** upload this file to GitHub.
+* **Security Warning:** The `servers.txt` or `servers.json` files contains plain-text passwords. **DO NOT** upload this file to GitHub.
 
 ---
 
