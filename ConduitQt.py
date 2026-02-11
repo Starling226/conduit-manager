@@ -147,14 +147,6 @@ class LogFetcher(QRunnable):
         ip = self.server['ip']
         try:
             # 1. Fetch only relevant lines from journal
-            '''
-            cmd = (
-                f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | "
-                f"grep '[STATS]' | "
-                f"sed 's/.*conduit\[[0-9]*\]: //' | "
-                f"gzip -c"
-            )
-            '''
 
             cmd = (
                 f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | "
@@ -1298,7 +1290,10 @@ class ConduitGUI(QMainWindow):
         self.server_data=[]
         self.init_ui()
 
-        self.load_servers_from_json()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        json_server_path = os.path.join(script_dir, "servers.json")
+
+        self.load_servers_from_json(json_server_path)
 
     def init_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -2255,30 +2250,47 @@ class ConduitGUI(QMainWindow):
     # --- Standard File/List Handlers ---
 
     def import_srv(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open File", "", "Text (*.txt)")
-        if path:
+        # 1. Open dialog for both file types
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open File", "", "Supported Files (*.json *.txt);;JSON (*.json);;Text (*.txt)"
+        )
+    
+        if not path:
+            return
 
-            # Check if servers.json already exists
-            output_file = 'servers.json'
-            if os.path.exists(output_file):
+        # Determine paths
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        local_json = os.path.join(base_dir, 'servers.json')
+    
+        # 2. Preparation
+        self.current_path = path
+        self.server_data = []
+        self.pool.clear()
+        self.sel.clear()
+
+        # 3. Branching Logic
+        if path.lower().endswith('.json'):
+            # If it's a JSON, just load it directly
+            self.console.appendPlainText(f"[INFO] Loading JSON configuration: {os.path.basename(path)}")
+            self.load_servers_from_json(path)
+        
+        else:
+            # If it's a TXT, we check for overwrite because load_from_file likely saves to servers.json
+            if os.path.exists(local_json):
                 reply = QMessageBox.question(
                     self, 
                     'File Exists',
-                    f"The file '{output_file}' already exists. Do you want to overwrite it?",
-                    QMessageBox.Yes | QMessageBox.No, 
-                    QMessageBox.No
+                    f"A local 'servers.json' already exists. Importing this text file will overwrite your existing server list. Proceed?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                    QMessageBox.StandardButton.No
                 )
 
-                # If the user clicks 'No', stop the process and return
-                if reply == QMessageBox.No:
-                    self.console.appendPlainText("[CANCEL] import aborted by user.")
+                if reply == QMessageBox.StandardButton.No:
+                    self.console.appendPlainText("[CANCEL] Import aborted to protect existing servers.json.")
                     return
 
-            self.current_path = path
-            self.server_data = []
-            self.pool.clear()
-            self.sel.clear()
-            self.load_from_file(self.current_path)
+            self.console.appendPlainText(f"[INFO] Converting and importing Text: {os.path.basename(path)}")
+            self.load_from_file(path)
 
     def move_to_sel(self):
         for it in self.pool.selectedItems():
