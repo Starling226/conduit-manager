@@ -46,7 +46,7 @@ else:
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cil/psiphon_config.json.backup"
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -72,15 +72,44 @@ class ReportFetcher(QRunnable):
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
 
-            connect_kwargs = {
-                "key_filename": [key_path], 
-                "timeout": 15,
-                "look_for_keys": False, 
-                "allow_agent": False  
-            }
+            p = int(self.server['port'])
+            user = self.server['user'].strip()
+            password = self.server['pass'].strip()
+            is_root = (user == "root")
 
-            with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
-                conn.run(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_kwargs = {
+                    "timeout": 15,
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
+                }
+                cfg = Config()
+
+            else:
+                # Password-based
+                connect_kwargs = {"password": password, "timeout": 10}
+                cfg = Config(overrides={'sudo': {'password': password}})
+
+            with Connection(host=ip, user=user, port=p, connect_kwargs=connect_kwargs, config=cfg) as conn:
+
+
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 15)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
+                        
+
+                # IMPORTANT: we specify latin-1 here so it maps bytes 1:1 to string characters
+
+                run_cmd(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
                 
                 encoded_string = text_buffer.getvalue()
                 
@@ -138,20 +167,44 @@ class LogFetcher(QRunnable):
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
 
-            connect_kwargs = {
-                "key_filename": [key_path], 
-                "timeout": 15,
-                "look_for_keys": False,  # STOP searching ~/.ssh/ for other keys
-                "allow_agent": False     # STOP trying to talk to Pageant/ssh-agent
-            }
+            p = int(self.server['port'])
+            user = self.server['user'].strip()
+            password = self.server['pass'].strip()
+            is_root = (user == "root")
 
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_kwargs = {
+                    "timeout": 15,
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
+                }
+                cfg = Config()
 
-            with Connection(host=ip, user=self.server['user'], port=int(self.server['port']), connect_kwargs=connect_kwargs) as conn:
+            else:
+                # Password-based
+                connect_kwargs = {"password": password, "timeout": 10}
+                cfg = Config(overrides={'sudo': {'password': password}})
+
+            with Connection(host=ip, user=user, port=p, connect_kwargs=connect_kwargs, config=cfg) as conn:
+
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 20)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
+                        
 
                 # IMPORTANT: we specify latin-1 here so it maps bytes 1:1 to string characters
-                conn.run(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
 
-#                compressed_bytes = text_buffer.getvalue().encode('latin-1')
+                run_cmd(cmd, hide=True, out_stream=text_buffer, encoding='latin-1')
+
                 # Retrieve the "stringified" bytes
                 encoded_string = text_buffer.getvalue()
                 if not encoded_string:
@@ -366,11 +419,42 @@ class AutoStatsWorker(QThread):
         try:
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
-            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 5}
+#            connect_kwargs = {"key_filename": [valid_keys], "look_for_keys": False, "allow_agent": False, "timeout": 10}
+            p = int(s['port'])
+            user = s['user'].strip()
+            password = s['pass'].strip()
+            is_root = (user == "root")
 
-            with Connection(host=s['ip'], user=s['user'], port=int(s['port']), connect_kwargs=connect_kwargs) as conn:
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_kwargs = {
+                    "timeout": 10,
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
+                }
+                cfg = Config()
+
+            else:
+                # Password-based
+                connect_kwargs = {"password": password, "timeout": 15}
+                cfg = Config(overrides={'sudo': {'password': password}})
+
+            with Connection(host=s['ip'], user=user, port=p, connect_kwargs=connect_kwargs, config=cfg) as conn:
                 # 1. Check if the service is actually RUNNING right now
-                status_check = conn.run("systemctl is-active conduit.service", hide=True, warn=True)
+
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 10)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
+
+                status_check = run_cmd("systemctl is-active conduit.service",hide=True, warn=True)
                 is_running = status_check.stdout.strip() == "active"
 
                 if not is_running:
@@ -380,7 +464,7 @@ class AutoStatsWorker(QThread):
 
                 # 2. If running, get the logs for the requested window
                 cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
-                result = conn.run(cmd, hide=True, timeout=15)
+                result = run_cmd(cmd, hide=True, timeout=15)
                 output = result.stdout.strip()
 
                 if output:
@@ -458,44 +542,50 @@ class ServerWorker(QThread):
 
     def ssh_task(self, s):
         try:
+
             p = int(s['port'])
             user = s['user'].strip()
             password = s['pass'].strip()
-            
-            # Cross-platform home directory
             home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+            is_root = (user == "root")
+            # Cross-platform home directory
             
-            potential_keys = [
-                os.path.join(home, ".ssh", "id_conduit")
-            ]
+            
+#            potential_keys = [
+#                os.path.join(home, ".ssh", "id_conduit")
+#            ]
             # Filter to only keys that actually exist on your Windows machine
-            valid_keys = [k for k in potential_keys if os.path.exists(k)]
+#            key_path = [k for k in potential_keys if os.path.exists(k)]
 
-            if not password:
+            if is_root:
                 # Key-based: Explicitly tell Fabric which files to use
                 connect_params = {
                     "timeout": 15,
-                    "key_filename": valid_keys,
-                    "look_for_keys": True,
-                    "allow_agent": True
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
                 }
                 cfg = Config()
-                use_sudo = (user != "root") # If not root, we might still need sudo even with keys
+
             else:
                 # Password-based
-                connect_params = {"password": password, "timeout": 10}
+                connect_params = {"password": password, "timeout": 15}
                 cfg = Config(overrides={'sudo': {'password': password}})
-                use_sudo = True
 
             with Connection(host=s['ip'], user=user, port=p, 
-                            connect_kwargs=connect_params, config=cfg) as c:
+                            connect_kwargs=connect_params, config=cfg) as conn:
                 
-                def run_cmd(cmd):
-                    # If we have a password, use sudo; otherwise run direct
-                    if use_sudo and password:
-                        return c.sudo(cmd, hide=True, warn=True)
-                    else:
-                        return c.run(cmd, hide=True, warn=True)
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 10)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
 
                 def get_conduit_stats():
                     service_path = "/etc/systemd/system/conduit.service"
@@ -503,7 +593,7 @@ class ServerWorker(QThread):
                     # This command searches the ExecStart line for the flags and returns just the values
                     cmd = f"grep 'ExecStart' {service_path} | grep -oP '(?<=--max-clients )[0-9]+|(?<=--bandwidth )[0-9.]+'"
     
-                    result = run_cmd(cmd)
+                    result = run_cmd(cmd, hide=True, warn=True)
     
                     if result and result.ok:
                         # result.stdout will contain two lines: max-clients and bandwidth
@@ -519,11 +609,11 @@ class ServerWorker(QThread):
 
                 if self.action == "reset":
                     # 1. Stop the service
-                    run_cmd("systemctl stop conduit")
+                    run_cmd("systemctl stop conduit", hide=True, warn=True)
                     time.sleep(2)
                     # 2. Wipe the data directory (CAUTION: Destructive)
                     # We use -rf to ensure it clears everything inside
-                    run_cmd("rm -rf /var/lib/conduit/*")
+                    run_cmd("rm -rf /var/lib/conduit/*", hide=True, warn=True)
                     
                     # 3. Apply Config if requested
 
@@ -533,21 +623,21 @@ class ServerWorker(QThread):
                         else:
                             exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
 
-                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service")
-                        run_cmd("systemctl daemon-reload")
+                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service", hide=True, warn=True)
+                        run_cmd("systemctl daemon-reload", hide=True, warn=True)
                     
                     # 4. Start service
-                    run_cmd("systemctl start conduit")
+                    run_cmd("systemctl start conduit", hide=True, warn=True)
                     return f"[!] {s['name']}: FULL RESET COMPLETE (Data wiped & restarted)."
 
                 if self.action == "status":
                     # 1. Get the standard systemctl status (Active/Inactive)
-                    status_res = run_cmd("systemctl is-active conduit")
+                    status_res = run_cmd("systemctl is-active conduit", hide=True, warn=True)
                     current_status = status_res.stdout.strip() if status_res.ok else "inactive"
                     current_status = f"[*] {s['name']} ({s['ip']}): { current_status.upper()}"
 
                     remote_date_cmd = "date '+%Y-%m-%d %H:%M:%S'"
-                    result = run_cmd(remote_date_cmd)
+                    result = run_cmd(remote_date_cmd, hide=True, warn=True)
 
                     if result.ok:
                         remote_time = result.stdout.strip()
@@ -556,7 +646,7 @@ class ServerWorker(QThread):
                         remote_time = "00-00-00 00-00-00"
 
                     # 2. Get the last 5 lines of the journal
-                    log_res = run_cmd("journalctl -u conduit.service -n 10 --no-pager")
+                    log_res = run_cmd("journalctl -u conduit.service -n 10 --no-pager", hide=True, warn=True)
                     journal_logs = log_res.stdout if log_res.ok else "No logs found."
 
                     # 3. Combine them for the UI
@@ -567,7 +657,8 @@ class ServerWorker(QThread):
                 service_file = "/etc/systemd/system/conduit.service"
                 
                 if self.action == "stop":
-                    c.sudo("systemctl stop conduit", hide=True)
+#                    c.sudo("systemctl stop conduit", hide=True)
+                    run_cmd("systemctl stop conduit", hide=True)
                     return f"[-] {s['name']} Stopped."
 
                 if self.action in ["start", "restart"]:
@@ -578,10 +669,13 @@ class ServerWorker(QThread):
                             exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
 
                         sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
-                        c.sudo(sed_cmd, hide=True)
-                        c.sudo("systemctl daemon-reload", hide=True)
+#                        c.sudo(sed_cmd, hide=True)
+                        run_cmd(sed_cmd, hide=True)
+#                        c.sudo("systemctl daemon-reload", hide=True)
+                        run_cmd("systemctl daemon-reload", hide=True)
                     
-                    c.sudo(f"systemctl {self.action} conduit", hide=True)
+#                    c.sudo(f"systemctl {self.action} conduit", hide=True)
+                    run_cmd(f"systemctl {self.action} conduit", hide=True)
                     return f"[+] {s['name']} {self.action.capitalize()}ed."
                 
         except Exception as e:
@@ -650,13 +744,46 @@ class StatsWorker(QThread):
         try:
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
-            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 10}
+#            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 10}
 
-            with Connection(host=s['ip'], user=s['user'], port=int(s['port']), connect_kwargs=connect_kwargs) as conn:
+            p = int(s['port'])
+            user = s['user'].strip()
+            password = s['pass'].strip()
+            is_root = (user == "root")
+
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_kwargs = {
+                    "timeout": 10,
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
+                }
+                cfg = Config()
+
+            else:
+                # Password-based
+                connect_kwargs = {"password": password, "timeout": 15}
+                cfg = Config(overrides={'sudo': {'password': password}})
+
+            with Connection(host=s['ip'], user=user, port=p, connect_kwargs=connect_kwargs, config=cfg) as conn:
+
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 10)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
+
                 # Command to get last 1 hour of raw stats
 #                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep '\\[STATS\\]'"
                 cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
-                result = conn.run(cmd, hide=True, timeout=15)
+#                result = conn.run(cmd, hide=True, timeout=15)
+                result = run_cmd(cmd,hide=True, timeout=15)
                 output = result.stdout.strip()
 
                 if output:
@@ -874,13 +1001,26 @@ class DeployWorker(QThread):
 
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
+            p = int(s['port'])
+            user = s['user'].strip()
+            password = s['pass'].strip()
+            is_root = (user == "root")
         
-            pwd = s.get('pass') 
-        
-            conn_params = {
-                "timeout": 10,
-                "banner_timeout": 20
-            }
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_params = {
+                    "timeout": 10,
+                    "banner_timeout": 20,
+                    "key_filename": [key_path],
+                    "look_for_keys": True,
+                    "allow_agent": True
+                }
+                cfg = Config()
+
+            else:
+                # Password-based
+                connect_params = {"password": password, "timeout": 10, "banner_timeout": 20}
+                cfg = Config(overrides={'sudo': {'password': password}})
 
             if conduit_release == 'pre_release':
                 # Pre-release uses the extra config, geo, and stats flags
@@ -901,62 +1041,71 @@ class DeployWorker(QThread):
                 f"--data-dir /var/lib/conduit"
             )
 
-            if pwd:
-                conn_params["password"] = pwd
-                conn_params["look_for_keys"] = True
-                conn_params["allow_agent"] = False
-            else:
-                # Key-only mode
-                conn_params["key_filename"] = [key_path]
-                conn_params["look_for_keys"] = False
-                conn_params["allow_agent"] = False
-
             with Connection(host=s['ip'], 
-                            user=self.params['user'],
-                            port=int(s['port']), 
-                            connect_kwargs=conn_params,
+                            user=user,
+                            port=p, 
+                            connect_kwargs=connect_params,
+                            config=cfg,
                             inline_ssh_env=True
             ) as conn:
                 
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+
+                    if is_root:
+                        return c.run(cmd, **kwargs)
+                    else:    
+                        return c.sudo(cmd, **kwargs)  
+
                 # Check if we are actually root or have access
                 # This "id -u" check returns 0 for root
-                res = conn.run("id -u", hide=True, warn=True)
+
+                res = run_cmd("id -u",hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
 
                 # 1. Key Injection
                 
-                conn.run("mkdir -p ~/.ssh && chmod 700 ~/.ssh", hide=True)
-                conn.run(f'echo "{pub_key}" >> ~/.ssh/authorized_keys', hide=True)
-                conn.run("chmod 600 ~/.ssh/authorized_keys", hide=True)
+                run_cmd("mkdir -p ~/.ssh && chmod 700 ~/.ssh",hide=True)
+                run_cmd(f'echo "{pub_key}" >> ~/.ssh/authorized_keys',hide=True)
+                run_cmd("chmod 600 ~/.ssh/authorized_keys",hide=True)
                 
 
                 # 2. Cleanup & Directory Prep
-                conn.run("systemctl stop conduit", warn=True, hide=True)
+
+                run_cmd("systemctl stop conduit", warn=True, hide=True)
                 time.sleep(2)
-                conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
-                conn.run("mkdir -p /opt/conduit", hide=True)
+                run_cmd("rm -f /opt/conduit/conduit", warn=True, hide=True)
+                run_cmd("mkdir -p /opt/conduit", hide=True)
+
                 # Crucial: The service hardening requires this directory to exist beforehand
-                conn.run("rm -rf /var/lib/conduit", warn=True, hide=True)
-                conn.run("mkdir -p /var/lib/conduit", hide=True) 
+
+                run_cmd("rm -rf /var/lib/conduit", warn=True, hide=True)
+                run_cmd("mkdir -p /var/lib/conduit", hide=True)
 
                 # install system and network monitoring packages
-                if conn.run("command -v dnf", warn=True, hide=True).ok:
-                    conn.run("dnf install epel-release -y", hide=True)
-                    conn.run("dnf install tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
-                else:
-                    conn.run("apt-get update -y", hide=True)
-                    conn.run("apt-get install tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
 
-                pkg_cmd = "dnf install wget firewalld curl -y" if conn.run("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
-                conn.run(pkg_cmd, hide=True)
+                if run_cmd("command -v dnf", warn=True, hide=True).ok:
+                    run_cmd("dnf install epel-release -y", hide=True)
+                    run_cmd("dnf install tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
+                else:
+#                    conn.run("apt-get update -y", hide=True)
+                    run_cmd("apt-get update -y", hide=True)
+                    run_cmd("apt-get install tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
+
+                pkg_cmd = "dnf install wget firewalld curl -y" if run_cmd("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
+
+                run_cmd(pkg_cmd, hide=True)
 
                 # 3. Download Binary
-                conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)           
-                conn.run("chmod +x /opt/conduit/conduit")                
+
+                run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)
+                run_cmd("chmod +x /opt/conduit/conduit")
 
                 if conduit_release == 'pre_release':
-                    conn.run(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
+                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 
                 # 4. Manually Create the Service File (Replacing 'service install')
                 service_content = f"""[Unit]
@@ -985,23 +1134,23 @@ WantedBy=multi-user.target
 """
                 # Escape single quotes in the content if any (though there are none currently)
                 # We use sudo tee to write to the protected system directory
-                conn.run(f"echo '{service_content}' | sudo tee /etc/systemd/system/conduit.service > /dev/null")
+                run_cmd(f"echo '{service_content}' | sudo tee /etc/systemd/system/conduit.service > /dev/null")
 
                 # 5. Reload, Enable, and Start
-                conn.run("systemctl daemon-reload", hide=True)
-                conn.run("systemctl enable conduit", hide=True)
-                conn.run("systemctl start conduit", hide=True)
+                run_cmd("systemctl daemon-reload", hide=True)
+                run_cmd("systemctl enable conduit", hide=True)
+                run_cmd("systemctl start conduit", hide=True)
                 
                 # 6. Download Stats Script from GitHub
                 # We use the 'raw' GitHub URL to get the actual code, not the HTML page
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
-                conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
-                conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+                run_cmd(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
+                run_cmd("chmod +x /opt/conduit/get_conduit_stat.py")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
                 cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
+                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
                 if pwd:
                     self.remove_password_signal.emit(s['ip'])
@@ -1015,52 +1164,61 @@ WantedBy=multi-user.target
 
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
-        
-            conn_params = {
-                "timeout": 10,
-                "banner_timeout": 20
-            }
+            p = int(s['port'])
+            user = s['user'].strip()
+            password = s['pass'].strip()
+            is_root = (user == "root")
+
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_params = {
+                    "timeout": 10,
+                    "banner_timeout": 20,
+                    "key_filename": [key_path],
+                    "look_for_keys": True,
+                    "allow_agent": True
+                }
+                cfg = Config()
+
+            else:
+                # Password-based
+                connect_params = {"password": password, "timeout": 10, "banner_timeout": 20}
+                cfg = Config(overrides={'sudo': {'password': password}})
 
             try:
                 # Automatically extract 'version' from the URL
                 version_tag = CONDUIT_URL.split('/')[-2]
             except (NameError, IndexError):
                 version_tag = "Unknown"
-                        
-            conn_params["key_filename"] = [key_path]
-            conn_params["look_for_keys"] = False
-            conn_params["allow_agent"] = False            
-            
-            pwd = s.get('pass') 
-            
-            if pwd:
-                conn_params["password"] = pwd
-                conn_params["look_for_keys"] = True
-                conn_params["allow_agent"] = False
-            else:
-                # Key-only mode
-                conn_params["key_filename"] = [key_path]
-                conn_params["look_for_keys"] = False
-                conn_params["allow_agent"] = False
-            
-
+                                    
             with Connection(host=s['ip'], 
                             user=self.params['user'],
                             port=int(s['port']), 
-                            connect_kwargs=conn_params,
+                            connect_kwargs=connect_params,
+                            config=cfg,
                             inline_ssh_env=True
             ) as conn:
                 
+                def run_cmd(cmd, **kwargs):
+
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+
+                    if is_root:
+                        return c.run(cmd, **kwargs)
+                    else:    
+                        return c.sudo(cmd, **kwargs) 
+
                 # Check if we are actually root or have access
                 # This "id -u" check returns 0 for root
-                res = conn.run("id -u", hide=True, warn=True)
+                res = run_cmd("id -u", hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
                 
                 
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
-                v_check = conn.run("/opt/conduit/conduit --version", hide=True, warn=True)
+                v_check = run_cmd("/opt/conduit/conduit --version", hide=True, warn=True)
                 
                 if v_check.ok:
                     # Extract the hash from "conduit version e421eff"
@@ -1073,43 +1231,43 @@ WantedBy=multi-user.target
                 # 2. Cleanup & Stop (Only runs if version is different or binary missing)
                 self.log_signal.emit(f"[{s['ip']}] Upgrading {current_version} -> {version_tag}...")
                 
-                conn.run("systemctl stop conduit", warn=True, hide=True)
+                run_cmd("systemctl stop conduit", warn=True, hide=True)
                 time.sleep(2)
-                conn.run("rm -f /opt/conduit/conduit", warn=True, hide=True)
+                run_cmd("rm -f /opt/conduit/conduit", warn=True, hide=True)
 
                 # 3. Download Binary
-                conn.run(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
-                conn.run("chmod +x /opt/conduit/conduit")
+                run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
+                run_cmd("chmod +x /opt/conduit/conduit")
 
                 if conduit_release == 'pre_release':
-                    conn.run(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
+                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
                     cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
-                    conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-                    conn.run("systemctl daemon-reload")                    
+                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                    run_cmd("systemctl daemon-reload")                    
 
                 if conduit_release != 'pre_release':
                     if self.params['update']:
                         cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
                     
-                    conn.run(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-                    conn.run("systemctl daemon-reload")
+                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+                    run_cmd("systemctl daemon-reload")
 
                 # 5. Start
-                conn.run("systemctl start conduit", hide=True)      
+                run_cmd("systemctl start conduit", hide=True)      
                 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
-                conn.run(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
-                conn.run("chmod +x /opt/conduit/get_conduit_stat.py")
+                run_cmd(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
+                run_cmd("chmod +x /opt/conduit/get_conduit_stat.py")
     
                 current_year = datetime.now().year
                 filename = f"/opt/conduit/{current_year}-conduit.log"
                 backup_log = f"/opt/conduit/{current_year}-conduit.log.bak"
                 
                 # Check if file exists (-f) then move (mv)
-                result = conn.run(f'test -f {filename}', warn=True, hide=True)
+                result = run_cmd(f'test -f {filename}', warn=True, hide=True)
  
                 if result.ok:
-                    conn.run(f'mv {filename} {backup_log}', hide=True)
+                    run_cmd(f'mv {filename} {backup_log}', hide=True)
                 else:
                     print(f"Skipping backup: {filename} does not exist.")
                 
