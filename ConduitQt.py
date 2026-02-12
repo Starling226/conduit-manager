@@ -44,7 +44,7 @@ if conduit_release == "official":
 else:
     CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
 
-PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cil/psiphon_config.json.backup"
+PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
 APP_VERSION = "2.3.1"
 
