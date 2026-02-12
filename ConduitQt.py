@@ -649,7 +649,6 @@ class ServerWorker(QThread):
                 service_file = "/etc/systemd/system/conduit.service"
                 
                 if self.action == "stop":
-#                    c.sudo("systemctl stop conduit", hide=True)
                     run_cmd("systemctl stop conduit", hide=True)
                     return f"[-] {s['name']} Stopped."
 
@@ -661,12 +660,9 @@ class ServerWorker(QThread):
                             exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
 
                         sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
-#                        c.sudo(sed_cmd, hide=True)
                         run_cmd(sed_cmd, hide=True)
-#                        c.sudo("systemctl daemon-reload", hide=True)
                         run_cmd("systemctl daemon-reload", hide=True)
                     
-#                    c.sudo(f"systemctl {self.action} conduit", hide=True)
                     run_cmd(f"systemctl {self.action} conduit", hide=True)
                     return f"[+] {s['name']} {self.action.capitalize()}ed."
                 
@@ -1003,9 +999,7 @@ class DeployWorker(QThread):
                 connect_params = {
                     "timeout": 10,
                     "banner_timeout": 20,
-                    "key_filename": [key_path],
-                    "look_for_keys": True,
-                    "allow_agent": True
+                    "password": password,
                 }
                 cfg = Config()
 
@@ -1013,6 +1007,7 @@ class DeployWorker(QThread):
                 # Password-based
                 connect_params = {"password": password, "timeout": 10, "banner_timeout": 20}
                 cfg = Config(overrides={'sudo': {'password': password}})
+            
 
             if conduit_release == 'pre_release':
                 # Pre-release uses the extra config, geo, and stats flags
@@ -1047,9 +1042,9 @@ class DeployWorker(QThread):
                     kwargs.setdefault('warn', False)
 
                     if is_root:
-                        return c.run(cmd, **kwargs)
+                        return conn.run(cmd, **kwargs)
                     else:    
-                        return c.sudo(cmd, **kwargs)  
+                        return conn.sudo(cmd, **kwargs)  
 
                 # Check if we are actually root or have access
                 # This "id -u" check returns 0 for root
@@ -1144,8 +1139,8 @@ WantedBy=multi-user.target
                 # This command checks if the job exists; if not, it adds it to the crontab
                 run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
-                if pwd:
-                    self.remove_password_signal.emit(s['ip'])
+#                if pwd:
+#                    self.remove_password_signal.emit(s['ip'])
 
                 return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
         except Exception as e:
@@ -1197,9 +1192,9 @@ WantedBy=multi-user.target
                     kwargs.setdefault('warn', False)
 
                     if is_root:
-                        return c.run(cmd, **kwargs)
+                        return conn.run(cmd, **kwargs)
                     else:    
-                        return c.sudo(cmd, **kwargs) 
+                        return conn.sudo(cmd, **kwargs) 
 
                 # Check if we are actually root or have access
                 # This "id -u" check returns 0 for root
@@ -1889,11 +1884,11 @@ class ConduitGUI(QMainWindow):
 
         if len(selected_targets) == 1:
             target = selected_targets[0]
-#            stored_user = target.get('user', '').strip().lower()
+            stored_user = target.get('user', '').strip().lower()
+            stored_pwd = target.get('pass', '').strip()
             target_ip = target.get('ip', '').strip()
-            stored_user,stored_pwd = self.get_root_pwd_from_file(target_ip)
-#            stored_pwd = target.get('pass', '').strip()
-            
+#            stored_user,stored_pwd = self.get_root_pwd_from_file(target_ip)
+                        
             # Check if we have a password AND it belongs to root
             has_root_creds = (stored_user == 'root' and stored_pwd)
 
