@@ -1844,7 +1844,8 @@ class ConduitGUI(QMainWindow):
 
     def run_deploy(self):
         # 1. Get targets
-        selected_targets = [self.find_data_by_item(self.sel.item(i)) for i in range(self.sel.count())]
+
+        selected_targets = self.get_target_servers(True)
         if not selected_targets:
             QMessageBox.warning(self, "Deployment", "No servers selected.")
             return
