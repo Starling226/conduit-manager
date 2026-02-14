@@ -82,7 +82,7 @@ To run ConduitQt.py, simply double click on or run them in the command line term
 The Start, Stop, Re-Start, Reset, Status, Upgrade, Deploy allows you to manage your servers efficiently. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and get clients.
 
 ### Using servers.txt
-For the Management and Monitoring, you need to create a `servers.txt` file in the same directory that you run `ConduitQt.py`. After importing the servers.text, it will be automatically converted into `servers.json`. The next time you launch the application, it imports `servers.json` automatically. `servers.json` must be available in the directory you launch the `ConduitQt.py`. You can add, delete, or update the individual server profile within the GUI. If you import `servers.txt` later, it will overwrite the existing `servers.json`. Upon successfull deployment the ssh public key will be injected to the server. You must add root user or a sudoer user for deployment and other processes. Communication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22.
+For the Management and Monitoring, you need to create a `servers.txt` file in the same directory that you run `ConduitQt.py`. After importing the servers.text, it will be automatically converted into `servers.json`. The next time you launch the application, it imports `servers.json` automatically. `servers.json` must be available in the directory you launch the `ConduitQt.py`. You can add, delete, or update the individual server profile within the GUI. If you import `servers.txt` later, it will overwrite the existing `servers.json`. Upon successfull deployment the ssh public key will be injected to the server. You must add root user or a sudoer user for deployment and other processes. Communication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22 but it is recommended to change it to different port to avoid attracting ssh probing your system. You may choose port 2000 < port < 3000
 
 **Format:**
 `name,hostname,port,username,password`. Do not add this header to servers.txt.
@@ -126,7 +126,7 @@ After installation, the Psiphon network requires time for vetting and propagatio
 * **Report:** Report allows you to download and display conduit hourly network traffic across the individual servers. When you click on Traffic, it imports the server hourly log files from local disk. Within the Visualizer window you can click on "Reload to retrieve the data" and it starts fetching the latest hourly logs from the servers. Please be patient, it may takes a couple of minutes to download the logs.
 
 ## Important Notes
-* **SSH Port:** These scripts use the standard **SSH Port 22** for all connections.
+* **SSH Port:** These scripts use the standard **SSH Port 22** for all connections y default, unless you choose a different port.
 * **Security Warning:** The `servers.txt` or `servers.json` files contains plain-text passwords. **DO NOT** upload this file to GitHub.
 
 ---
