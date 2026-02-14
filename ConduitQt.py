@@ -46,7 +46,7 @@ else:
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -74,7 +74,7 @@ class ReportFetcher(QRunnable):
 
             p = int(self.server['port'])
             user = self.server['user'].strip()
-            password = self.server['pass'].strip()
+            password = self.server['password'].strip()
             is_root = (user == "root")
 
             if is_root:
@@ -161,7 +161,7 @@ class LogFetcher(QRunnable):
 
             p = int(self.server['port'])
             user = self.server['user'].strip()
-            password = self.server['pass'].strip()
+            password = self.server['password'].strip()
             is_root = (user == "root")
 
             if is_root:
@@ -316,11 +316,11 @@ class ServerDialog(QDialog):
         self.layout.setContentsMargins(15, 15, 15, 15)
         self.layout.setSpacing(10)
 
-        self.name_edit = QLineEdit(data['name'] if data else "")
+        self.name_edit = QLineEdit(data['server'] if data else "")
         self.ip_edit = QLineEdit(data['ip'] if data else "")
         self.port_edit = QLineEdit(str(data['port']) if data else "22")
         self.user_edit = QLineEdit(data['user'] if data else "root")
-        self.pass_edit = QLineEdit(data['pass'] if data else "")
+        self.pass_edit = QLineEdit(data['password'] if data else "")
         self.pass_edit.setEchoMode(QLineEdit.Password)
         
         self.layout.addRow("Name:", self.name_edit)
@@ -340,11 +340,11 @@ class ServerDialog(QDialog):
 
     def get_data(self):
         return {
-            "name": self.name_edit.text().strip(),
+            "server": self.name_edit.text().strip(),
             "ip": self.ip_edit.text().strip(),
             "port": self.port_edit.text().strip(),
             "user": self.user_edit.text().strip(),
-            "pass": self.pass_edit.text().strip()
+            "password": self.pass_edit.text().strip()
         }
 
 
@@ -414,7 +414,7 @@ class AutoStatsWorker(QThread):
 #            connect_kwargs = {"key_filename": [valid_keys], "look_for_keys": False, "allow_agent": False, "timeout": 10}
             p = int(s['port'])
             user = s['user'].strip()
-            password = s['pass'].strip()
+            password = s['password'].strip()
             is_root = (user == "root")
 
             if is_root:
@@ -537,7 +537,7 @@ class ServerWorker(QThread):
 
             p = int(s['port'])
             user = s['user'].strip()
-            password = s['pass'].strip()
+            password = s['password'].strip()
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
             is_root = (user == "root")
@@ -620,13 +620,13 @@ class ServerWorker(QThread):
                     
                     # 4. Start service
                     run_cmd("systemctl start conduit", hide=True, warn=True)
-                    return f"[!] {s['name']}: FULL RESET COMPLETE (Data wiped & restarted)."
+                    return f"[!] {s['server']}: FULL RESET COMPLETE (Data wiped & restarted)."
 
                 if self.action == "status":
                     # 1. Get the standard systemctl status (Active/Inactive)
                     status_res = run_cmd("systemctl is-active conduit", hide=True, warn=True)
                     current_status = status_res.stdout.strip() if status_res.ok else "inactive"
-                    current_status = f"[*] {s['name']} ({s['ip']}): { current_status.upper()}"
+                    current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
 
                     remote_date_cmd = "date '+%Y-%m-%d %H:%M:%S'"
                     result = run_cmd(remote_date_cmd, hide=True, warn=True)
@@ -650,7 +650,7 @@ class ServerWorker(QThread):
                 
                 if self.action == "stop":
                     run_cmd("systemctl stop conduit", hide=True)
-                    return f"[-] {s['name']} Stopped."
+                    return f"[-] {s['server']} Stopped."
 
                 if self.action in ["start", "restart"]:
                     if self.config['update']:
@@ -664,10 +664,10 @@ class ServerWorker(QThread):
                         run_cmd("systemctl daemon-reload", hide=True)
                     
                     run_cmd(f"systemctl {self.action} conduit", hide=True)
-                    return f"[+] {s['name']} {self.action.capitalize()}ed."
+                    return f"[+] {s['server']} {self.action.capitalize()}ed."
                 
         except Exception as e:
-            return f"[!] {s['name']} Error: {str(e)}"            
+            return f"[!] {s['server']} Error: {str(e)}"            
 
 class StatsWorker(QThread):
     finished_signal = pyqtSignal(str)
@@ -724,7 +724,7 @@ class StatsWorker(QThread):
         return data_points
 
     def get_stats(self, s):
-        display_label = s['name'] if self.display_mode == 'name' else s['ip']
+        display_label = s['server'] if self.display_mode == 'server' else s['ip']
         res = {"label": display_label, "success": False, "clients": "0", "up": "0B", 
                "down": "0B", "uptime": "Offline", "mbps": "0.00", "mbps_val": 0.0,
                "mbps_1h": "0.00","up_1h": "0B", "down_1h": "0B"}
@@ -734,9 +734,9 @@ class StatsWorker(QThread):
             key_path = os.path.join(home, ".ssh", "id_conduit")
 #            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 10}
 
-            p = int(s['port'])
+            port_num = int(s['port'])
             user = s['user'].strip()
-            password = s['pass'].strip()
+            password = s['password'].strip()
             is_root = (user == "root")
 
             if is_root:
@@ -754,7 +754,7 @@ class StatsWorker(QThread):
                 connect_kwargs = {"password": password, "timeout": 15}
                 cfg = Config(overrides={'sudo': {'password': password}})
 
-            with Connection(host=s['ip'], user=user, port=p, connect_kwargs=connect_kwargs, config=cfg) as conn:
+            with Connection(host=s['ip'], user=user, port=port_num, connect_kwargs=connect_kwargs, config=cfg) as conn:
 
                 def run_cmd(cmd, **kwargs):
 
@@ -989,9 +989,14 @@ class DeployWorker(QThread):
 
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
-            p = int(s['port'])
+            port_num = int(s['port'])
+            ssh_port = int(s['port'])
+
+            if self.params['default_port']:
+                ssh_port = 22
+
             user = s['user'].strip()
-            password = s['pass'].strip()
+            password = s['password'].strip()
             is_root = (user == "root")
         
             if is_root:
@@ -1030,7 +1035,7 @@ class DeployWorker(QThread):
 
             with Connection(host=s['ip'], 
                             user=user,
-                            port=p, 
+                            port=ssh_port, 
                             connect_kwargs=connect_params,
                             config=cfg,
                             inline_ssh_env=True
@@ -1059,6 +1064,15 @@ class DeployWorker(QThread):
                 run_cmd(f'echo "{pub_key}" >> ~/.ssh/authorized_keys',hide=True)
                 run_cmd("chmod 600 ~/.ssh/authorized_keys",hide=True)
                 
+                os_check = run_cmd("grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"'", hide=True)
+                os_id = os_check.stdout.strip()
+
+                if "rhel" in os_id or "rocky" in os_id or "almalinux" in os_id or "centos" in os_id or "fedora" in os_id:
+                    print("Detected RHEL-based system.")
+                    rh_distro = True
+                elif "debian" in os_id or "ubuntu" in os_id:
+                    print("Detected Debian-based system.")
+                    rh_distro = False
 
                 # 2. Cleanup & Directory Prep
 
@@ -1074,17 +1088,14 @@ class DeployWorker(QThread):
 
                 # install system and network monitoring packages
 
-                if run_cmd("command -v dnf", warn=True, hide=True).ok:
+#                if run_cmd("command -v dnf", warn=True, hide=True).ok:
+                if rh_distro:
                     run_cmd("dnf install epel-release -y", hide=True)
-                    run_cmd("dnf install tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
+                    run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
                 else:
 #                    conn.run("apt-get update -y", hide=True)
                     run_cmd("apt-get update -y", hide=True)
-                    run_cmd("apt-get install tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
-
-                pkg_cmd = "dnf install wget firewalld curl -y" if run_cmd("command -v dnf", warn=True, hide=True).ok else "apt-get update -y && apt-get install wget firewalld curl -y"
-
-                run_cmd(pkg_cmd, hide=True)
+                    run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
 
                 # 3. Download Binary
 
@@ -1139,6 +1150,87 @@ WantedBy=multi-user.target
                 # This command checks if the job exists; if not, it adds it to the crontab
                 run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
 
+                config_path = "/etc/ssh/sshd_config"
+                cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
+                current_port_cmd = run_cmd(cmd, hide=True)
+                current_port = current_port_cmd.stdout.strip() or "22" # Default to 22 if not found
+
+                if str(port_num) == str(current_port):
+                    print(f"Port is already {port_num}. No changes needed.")
+                    return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
+
+                print(f"Changing SSH port from {current_port} to {port_num}...")
+                    
+                # 1. Start the service
+                run_cmd("systemctl start firewalld", hide=True)
+                run_cmd("systemctl enable firewalld", hide=True)
+
+                # 2. Loop until firewalld is actually running or we timeout
+                max_attempts = 10
+                attempts = 0
+                is_running = False
+
+                print("Waiting for firewalld to start...")
+
+                while attempts < max_attempts:
+                    # Check status
+                    check = run_cmd("firewall-cmd --state", warn=True, hide=True)
+    
+                    # firewall-cmd --state returns exit code 0 if running
+                    if check.ok:
+                        is_running = True
+                        break
+    
+                    attempts += 1
+                    time.sleep(1) # Short poll interval
+
+                if is_running:
+                    print("Firewalld is active.")
+                    # Check if SELinux is active before running semanage
+                    if str(port_num) == "22":
+                        run_cmd("firewall-cmd --add-service=ssh --permanent", hide=True)
+                    else:                    
+                        selinux_check = run_cmd("getenforce", warn=True, hide=True)
+
+                        # getenforce returns "Enforcing", "Permissive", or "Disabled"
+                        if selinux_check.ok and "Disabled" not in selinux_check.stdout:
+                            print("SELinux is active. Updating policy...")
+                            # 2. Update the SELinux Policy to allow the new port
+                            run_cmd(f"semanage port -a -t ssh_port_t -p tcp {port_num}", warn=True)
+                        else:
+                            print("SELinux is disabled or not installed. Skipping policy update.")                    
+
+                        # 3. Open the new port in the firewall
+                        run_cmd(f"firewall-cmd --add-port={port_num}/tcp --permanent", hide=True)
+
+                        if str(current_port) == "22":
+                            # 4. Remove the old SSH service from the firewall
+                            run_cmd("firewall-cmd --remove-service=ssh --permanent", hide=True)
+                        else:
+                             # 4. Cleanup: Remove the OLD port/service from firewall                             
+                            run_cmd(f"firewall-cmd --remove-port={current_port}/tcp --permanent", hide=True)                                                
+
+                        # 5. Reload firewall to apply changes
+                        run_cmd("firewall-cmd --reload", hide=True)
+
+                else:
+                    print("Firewalld is NOT running. Skipping firewall rules.")
+
+                # 6. Update the SSH configuration File
+                # This regex replaces the existing active Port line regardless of what the number was
+                sed_cmd = f"sed -i 's/^Port {current_port}/Port {port_num}/' {config_path}"
+                # If the line was commented out (default), we use your previous regex
+                if current_port == "22":
+                    sed_cmd = f"sed -i 's/^#\\?Port 22.*/Port {port_num}/' {config_path}"
+
+                run_cmd(sed_cmd, hide=True)
+
+                # 7. Restart SSH service to apply config changes
+                if rh_distro:
+                    run_cmd("systemctl restart sshd", hide=True)
+                else:
+                    run_cmd("systemctl restart ssh", hide=True)
+                    
 #                if pwd:
 #                    self.remove_password_signal.emit(s['ip'])
 
@@ -1153,7 +1245,7 @@ WantedBy=multi-user.target
             key_path = os.path.join(home, ".ssh", "id_conduit")
             p = int(s['port'])
             user = s['user'].strip()
-            password = s['pass'].strip()
+            password = s['password'].strip()
             is_root = (user == "root")
 
             if is_root:
@@ -1603,7 +1695,7 @@ class ConduitGUI(QMainWindow):
             
             # Find the actual dictionary in memory
             data = self.find_data_by_item(it)
-            memory_name = data.get('name') if data else "NOT FOUND"
+            memory_name = data.get('server') if data else "NOT FOUND"
             
             print("--- SELECTION DEBUG ---")
             print(f"Widget: {sender.objectName()}")
@@ -1690,12 +1782,12 @@ class ConduitGUI(QMainWindow):
                 total_up_bytes += u_bytes
                 total_down_bytes += d_bytes
 
-            # Normalize IP and lookup name
+            # Normalize IP and lookup server
             raw_ip = str(r["ip"]).strip()
             server_name = raw_ip
             for s in self.server_data:
                 if str(s['ip']).strip() == raw_ip:
-                    server_name = str(s['name']).strip()
+                    server_name = str(s['server']).strip()
                     break
             
             display_text = server_name if self.rad_name.isChecked() else raw_ip
@@ -1793,7 +1885,7 @@ class ConduitGUI(QMainWindow):
         except:
             time_window_str = "60 minutes ago"
 
-        mode = 'name' if self.rad_name.isChecked() else 'ip'
+        mode = 'server' if self.rad_name.isChecked() else 'ip'
 
         # 4. Initialize Worker
         # IMPORTANT: Assign to self.auto_worker so it isn't deleted by Python
@@ -1856,15 +1948,26 @@ class ConduitGUI(QMainWindow):
         valid_targets = []
 
         # THE WARNING GATE ---
-        target_names = ", ".join([s.get('name', s['ip']) for s in selected_targets])
-        
+        target_names = ", ".join([s.get('server', s['ip']) for s in selected_targets])
+
+        port_22_detected = False
+        for s in selected_targets:
+            if int(s['port']) == 22:
+                port_22_detected = True
+                break
+
+        port_message = f"Your current port is {int(s['port'])}"
+        if port_22_detected:
+            port_message = f"Your current port is 22. It is recommnded to choose a port\n in range 2000 to 3000 to avoid active ssh probing your server"
+
         warning_msg = (
             "⚠️ CRITICAL: FRESH DEPLOYMENT\n\n"
             f"You are about to deploy to: {target_names}\n\n"
             "This action will:\n"
             "• Connect as ROOT\n"
             "• OVERWRITE any existing conduit installation if this is a re-deployment\n"
-            "• RESET all service configurations\n\n"
+            "• RESET all service configurations\n"
+            f"• {port_message}\n\n"
             "Are you absolutely sure you want to proceed?"
         )
 
@@ -1886,7 +1989,7 @@ class ConduitGUI(QMainWindow):
         if len(selected_targets) == 1:
             target = selected_targets[0]
             stored_user = target.get('user', '').strip().lower()
-            stored_pwd = target.get('pass', '').strip()
+            stored_pwd = target.get('password', '').strip()
             target_ip = target.get('ip', '').strip()
 #            stored_user,stored_pwd = self.get_root_pwd_from_file(target_ip)
                         
@@ -1909,26 +2012,48 @@ class ConduitGUI(QMainWindow):
                 if msg.clickedButton() == btn_pwd:
                     pwd_input, ok = QInputDialog.getText(self, "Root Password", "Enter Root Password:", QLineEdit.Password)
                     if ok and pwd_input:
-                        target['pass'] = pwd_input
+                        target['password'] = pwd_input
                         # We force the worker to use 'root' regardless of what's in the file
                         valid_targets = [target]
                     else: return
                 elif msg.clickedButton() == btn_key:
-                    target['pass'] = None 
+                    target['password'] = None 
                     valid_targets = [target]
                 else:
                     return
             else:
                 for s in selected_targets:
-                    # If password exists, or if we want to try key-only servers
-                    # For bulk, we'll assume if no password exists, we attempt Key-only
-                    valid_targets.append(s)
+                    valid_targets.append(s)                
+        else:
+            for s in selected_targets:
+                # If password exists, or if we want to try key-only servers
+                # For bulk, we'll assume if no password exists, we attempt Key-only
+                valid_targets.append(s)
 
         # 4. Final Verification
+
         if not valid_targets: return
+
+        warning_msg = (
+            "Is this the first time you deploy this system(s)?"
+        )
+
+        # Show the dialog with 'No' as the default safe choice
+        reply = QMessageBox.warning(
+            self, 
+            "Port Verification", 
+            warning_msg,
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            default_port = True
+        else:
+            default_port = False
 
         params = {
             "user": "root",
+            "default_port": default_port,
             "clients": validated['clients'], 
             "bw": validated['bw'],
             "update": self.chk_upd.isChecked()
@@ -1989,7 +2114,7 @@ class ConduitGUI(QMainWindow):
         valid_targets = []
 
         # THE WARNING GATE ---
-        target_names = ", ".join([s.get('name', s['ip']) for s in selected_targets])
+        target_names = ", ".join([s.get('server', s['ip']) for s in selected_targets])
         
         warning_msg = (
             "⚠️ CRITICAL: UPGARDE CONDUIT\n\n"
@@ -2043,7 +2168,7 @@ class ConduitGUI(QMainWindow):
             return
         '''    
         # Check which radio button is active
-        mode = 'name' if self.rad_name.isChecked() else 'ip'
+        mode = 'server' if self.rad_name.isChecked() else 'ip'
         
         self.console.appendPlainText(f"\n[>>>] Fetching Statistics (Display: {mode.upper()})...")
         self.stats_thread = StatsWorker(targets, mode)
@@ -2096,7 +2221,7 @@ class ConduitGUI(QMainWindow):
 
     def create_item(self, server_dict):
         # Determine text based on current radio button mode
-        text = server_dict['name'] if self.rad_name.isChecked() else server_dict['ip']
+        text = server_dict['server'] if self.rad_name.isChecked() else server_dict['ip']
         item = QListWidgetItem(text)
         
         # This is what find_data_by_item looks for!
@@ -2129,7 +2254,7 @@ class ConduitGUI(QMainWindow):
             if is_name_mode:
                 for s in self.server_data:
                     if str(s['ip']).strip() == target_text:
-                        target_text = str(s['name']).strip()
+                        target_text = str(s['server']).strip()
                         break
             
             item.setText(target_text)
@@ -2137,7 +2262,7 @@ class ConduitGUI(QMainWindow):
         self.stats_table.setSortingEnabled(True)
 
         # 3. Update ListWidgets
-        attr = 'name' if is_name_mode else 'ip'
+        attr = 'server' if is_name_mode else 'ip'
         for lw in [self.pool, self.sel]:
             for i in range(lw.count()):
                 it = lw.item(i)
@@ -2191,7 +2316,7 @@ class ConduitGUI(QMainWindow):
             QMessageBox.information(self, "Edit", "Please select a server first.")
             return
 
-#        print(f"EDITING: {data.get('name')} | IP: {data.get('ip')}")
+#        print(f"EDITING: {data.get('server')} | IP: {data.get('ip')}")
 
         dlg = ServerDialog(self, data)
         if dlg.exec_() == QDialog.Accepted:
@@ -2203,7 +2328,7 @@ class ConduitGUI(QMainWindow):
             
             self.save()
             self.sync_ui() 
-            self.console.appendPlainText(f"[*] Updated: {new_info['name']}")
+            self.console.appendPlainText(f"[*] Updated: {new_info['server']}")
 
     def remove_server_from_ui(self, ip_key):
         """Removes a server from all UI components by its IP key."""
@@ -2320,17 +2445,17 @@ class ConduitGUI(QMainWindow):
             d = dlg.get_data()
             
             # Extract and trim values
-            name = d.get('name', '').strip()
+            server = d.get('server', '').strip()
             ip = d.get('ip', '').strip()
             port = d.get('port', '').strip()
 
             # 1. Validate Name
-            if not name:
+            if not server:
                 QMessageBox.critical(self, "Invalid Name", "Server Name cannot be empty.")
                 return
             
             # Check for commas as they would break your CSV servers.txt format
-            if ',' in name:
+            if ',' in server:
                 QMessageBox.critical(self, "Invalid Name", "Server Name cannot contain commas.")
                 return
 
@@ -2364,7 +2489,7 @@ class ConduitGUI(QMainWindow):
             self.stats_table.insertRow(row_position)
 
             # Create the item for the first column and set the IP as UserRole
-            item = QTableWidgetItem(d['name'] if self.rad_name.isChecked() else d['ip'])
+            item = QTableWidgetItem(d['server'] if self.rad_name.isChecked() else d['ip'])
             item.setData(Qt.UserRole, d['ip'])
             self.stats_table.setItem(row_position, 0, item)
 
@@ -2380,7 +2505,7 @@ class ConduitGUI(QMainWindow):
             self.sync_ui() # Refresh all labels
 
             self.save()
-            self.console.appendPlainText(f"[OK] Added server: {name}")
+            self.console.appendPlainText(f"[OK] Added server: {server}")
 
     def save(self):
         # 1. Determine the path (default to servers.json)
@@ -2405,11 +2530,11 @@ class ConduitGUI(QMainWindow):
             output_data = []
             for s in self.server_data:
                 entry = {
-                    "server": s.get('name', ''),
+                    "server": s.get('server', ''),
                     "ip": s.get('ip', ''),
                     "port": int(s.get("port", 22)) if s.get("port") else 22,
                     "user": s.get('user', ''),
-                    "password": s.get('pass', '')  # Standardizing to 'password'
+                    "password": s.get('password', '')  # Standardizing to 'password'
                 }
                 output_data.append(entry)
 
@@ -2467,7 +2592,7 @@ class ConduitGUI(QMainWindow):
                     
                 parts = [p.strip() for p in line.split(',')]
 
-                # Basic requirement: name, ip, port, user
+                # Basic requirement: server, ip, port, user
                 if len(parts) >= 4:
                     # 1. IP Validation
                     if not self.is_valid_ip(parts[1].strip()):
@@ -2484,7 +2609,7 @@ class ConduitGUI(QMainWindow):
                 if parts[1] == target_ip:
                     if parts[3] == "root":
                         # Reconstruct line without the password
-                        # Format: name, ip, port, user, 
+                        # Format: server, ip, port, user, 
                         new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, "
                         updated_lines.append(new_line)
                     else:
@@ -2508,7 +2633,7 @@ class ConduitGUI(QMainWindow):
                     
                 parts = [p.strip() for p in line.split(',')]
 
-                # Basic requirement: name, ip, port, user
+                # Basic requirement: server, ip, port, user
                 if len(parts) < 5: continue
 
                 # 1. IP Validation
@@ -2539,7 +2664,7 @@ class ConduitGUI(QMainWindow):
 
             # Track IP → (line_number, server_name) for duplicate detection
             ip_seen = {}          # ip → first line number where it appeared
-            ip_server_map = {}    # ip → first server name (for nicer warning)
+            ip_server_map = {}    # ip → first server server (for nicer warning)
 
             with open(path, 'r', encoding='utf-8') as f:
                 for i, line in enumerate(f, start=1):  # line numbers start at 1
@@ -2592,11 +2717,11 @@ class ConduitGUI(QMainWindow):
 
                     # 4. Create entry
                     d = {
-                        'name': server_name,
+                        'server': server_name,
                         'ip': ip,
                         'port': str(port_num),  # string – good for fabric/invoke
                         'user': parts[3].strip(),
-                        'pass': parts[4].strip() if len(parts) > 4 else ''
+                        'password': parts[4].strip() if len(parts) > 4 else ''
                     }
 
                     self.server_data.append(d)
@@ -2648,17 +2773,17 @@ class ConduitGUI(QMainWindow):
                     continue
                 # ----------------------------
 
-                s_name = item.get("server", item.get("name", "")).strip()
-                s_pass = item.get("password", item.get("pass", ""))
+                s_name = item.get("server", item.get("server", "")).strip()
+                s_pass = item.get("password", item.get("password", ""))
                 s_port = str(item.get("port", "22"))
                 s_user = item.get("user", "root")
 
                 entry = {
-                    "name": s_name,
+                    "server": s_name,
                     "ip": s_ip,
                     "port": s_port,
                     "user": s_user,
-                    "pass": s_pass
+                    "password": s_pass
                 }
 
                 # 3. Add to Memory and Seen Set
@@ -2725,11 +2850,11 @@ class VisualizerWindow(QMainWindow):
         self.server_list = copy.deepcopy(server_list)
 
         d = {
-            "name": "---TOTAL---",
+            "server": "---TOTAL---",
             "ip":   "---.---.---.---",
             "port": 22,
             "user": "",
-            "pass": ""
+            "password": ""
         }
         self.server_list.append(d)
 
@@ -2894,8 +3019,8 @@ class VisualizerWindow(QMainWindow):
         """Updates display text for all items using the hidden IP key."""
         is_name_mode = self.rad_name.isChecked()
     
-        # Choose which key to show: 'name' or 'ip'
-        attr = 'name' if is_name_mode else 'ip'
+        # Choose which key to show: 'server' or 'ip'
+        attr = 'server' if is_name_mode else 'ip'
     
         # We must block signals so the text change doesn't trigger 
         # 'refresh_current_plot' 40 times in a row.
@@ -2908,7 +3033,7 @@ class VisualizerWindow(QMainWindow):
             # Get the hidden IP we stored in UserRole
             ip_key = item.data(Qt.UserRole)    
 
-            # Look up the name in your server_list
+            # Look up the server in your server_list
             found = False
             for s in self.server_list:
                 if str(s['ip']) == str(ip_key):
@@ -3511,11 +3636,11 @@ class VisualizerReportWindow(QMainWindow):
         self.console = console
         
         d = {
-            "name": "---TOTAL---",
+            "server": "---TOTAL---",
             "ip":   "---.---.---.---",
             "port": 22,
             "user": "",
-            "pass": ""
+            "password": ""
         }
         self.server_list.append(d)
 
@@ -3702,8 +3827,8 @@ class VisualizerReportWindow(QMainWindow):
         """Updates display text for all items using the hidden IP key."""
         is_name_mode = self.rad_name.isChecked()
     
-        # Choose which key to show: 'name' or 'ip'
-        attr = 'name' if is_name_mode else 'ip'
+        # Choose which key to show: 'server' or 'ip'
+        attr = 'server' if is_name_mode else 'ip'
     
         # We must block signals so the text change doesn't trigger 
         # 'refresh_current_plot' 40 times in a row.
@@ -3716,7 +3841,7 @@ class VisualizerReportWindow(QMainWindow):
             # Get the hidden IP we stored in UserRole
             ip_key = item.data(Qt.UserRole)    
 
-            # Look up the name in your server_list
+            # Look up the server in your server_list
             found = False
             for s in self.server_list:
                 if str(s['ip']) == str(ip_key):
