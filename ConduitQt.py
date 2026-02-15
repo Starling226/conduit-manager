@@ -36,18 +36,25 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
-#conduit_release = "pre_release"
-conduit_release = "official"
+conduit_release = "byte_release"
+#conduit_release = "psiphon"
+#conduit_release = "ssmirr"
 
-if conduit_release == "official":
-#    CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/d399071/conduit-linux-amd64"
+if conduit_release == "psiphon":
+    CONDUIT_URL = "https://github.com/Psiphon-Inc/conduit/releases/download/release-cli-1.5.0/conduit-linux-amd64"
+
+if conduit_release == "byte_release":
     CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/d399071/conduit"
-else:
-    CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
+
+if conduit_release == "ssmirr":
+    CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/d399071/conduit-linux-amd64"
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
 APP_VERSION = "2.3.2"
+
+class AppState:
+    use_lion_sun = False
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -542,6 +549,31 @@ class ServerWorker(QThread):
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
             is_root = (user == "root")
+
+            # Official psiphon release uses the simplified command
+            cmd_parts = [
+                "/opt/conduit/conduit start",
+                f"--max-clients {self.config['clients']}",
+                f"--bandwidth {self.config['bw']}",
+                "--data-dir /var/lib/conduit"
+            ]
+
+            service_file = "/etc/systemd/system/conduit.service"
+
+            if conduit_release != "psiphon":
+                # uses the extra config, geo, and stats flags
+                cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+
+                if conduit_release == "byte_release":
+                    # allows conduit to log bytes instead of KMGT
+                    cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                
+                if AppState.use_lion_sun:
+                    # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
+                    cmd_parts.append("--compartment shirokhorshid")
+
+            exec_cmd = " ".join(cmd_parts)
+
             # Cross-platform home directory
             
             
@@ -608,15 +640,17 @@ class ServerWorker(QThread):
                     # We use -rf to ensure it clears everything inside
                     run_cmd("rm -rf /var/lib/conduit/*", hide=True, warn=True)
                     
-                    # 3. Apply Config if requested
+                    # 3. Apply Config if requested 
 
                     if self.config['update']:
-                        if conduit_release == 'pre_release':
-                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
-                        else:
-                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+                        #if conduit_release == 'pre_release':
+#                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+#                        else:
+#                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
 
-                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service", hide=True, warn=True)
+#                        run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service", hide=True, warn=True)
+                        sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
+                        run_cmd(sed_cmd, hide=True, warn=True)
                         run_cmd("systemctl daemon-reload", hide=True, warn=True)
                     
                     # 4. Start service
@@ -645,9 +679,7 @@ class ServerWorker(QThread):
                     # 3. Combine them for the UI
                     
                     output = f"--- STATUS: {current_status} ---\n{get_conduit_stats()}  current system time: {remote_time}\n{journal_logs}"
-                    return output
-
-                service_file = "/etc/systemd/system/conduit.service"
+                    return output        
                 
                 if self.action == "stop":
                     run_cmd("systemctl stop conduit", hide=True)
@@ -655,10 +687,10 @@ class ServerWorker(QThread):
 
                 if self.action in ["start", "restart"]:
                     if self.config['update']:
-                        if conduit_release == 'pre_release':
-                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
-                        else:
-                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
+#                        if conduit_release == 'pre_release':
+#                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+#                        else:
+#                            exec_cmd = f"/opt/conduit/conduit start --max-clients {self.config['clients']} --bandwidth {self.config['bw']} --data-dir /var/lib/conduit"
 
                         sed_cmd = f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' {service_file}"
                         run_cmd(sed_cmd, hide=True)
@@ -1012,27 +1044,29 @@ class DeployWorker(QThread):
             else:
                 # Password-based
                 connect_params = {"password": password, "timeout": 10, "banner_timeout": 20}
-                cfg = Config(overrides={'sudo': {'password': password}})
-            
+                cfg = Config(overrides={'sudo': {'password': password}})            
 
-            if conduit_release == 'pre_release':
-                # Pre-release uses the extra config, geo, and stats flags
-                exec_cmd = (
-                    f"/opt/conduit/conduit start "
-                    f"--max-clients {self.params['clients']} "
-                    f"--bandwidth {self.params['bw']} "
-                    f"--psiphon-config /opt/conduit/psiphon_config.json "
-                    f"--geo --stats-file /opt/conduit/stats.json "
-                    f"--data-dir /var/lib/conduit"
-                )
-            else:
-                # Official release uses the simplified command
-                exec_cmd = (
-                f"/opt/conduit/conduit start "
-                f"--max-clients {self.params['clients']} "
-                f"--bandwidth {self.params['bw']} "
-                f"--data-dir /var/lib/conduit"
-            )
+            # Official psiphon release uses the simplified command
+            cmd_parts = [
+                "/opt/conduit/conduit start",
+                f"--max-clients {self.params['clients']}",
+                f"--bandwidth {self.params['bw']}",
+                "--data-dir /var/lib/conduit"
+            ]
+
+            if conduit_release != "psiphon":
+                # uses the extra config, geo, and stats flags
+                cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+
+                if conduit_release == "byte_release":
+                    # allows conduit to log bytes instead of KMGT
+                    cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                
+                if AppState.use_lion_sun:
+                    # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
+                    cmd_parts.append("--compartment shirokhorshid")
+
+            exec_cmd = " ".join(cmd_parts)
 
             with Connection(host=s['ip'], 
                             user=user,
@@ -1103,7 +1137,7 @@ class DeployWorker(QThread):
                 run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)
                 run_cmd("chmod +x /opt/conduit/conduit")
 
-                if conduit_release == 'pre_release':
+                if conduit_release == 'byte_release':
                     run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 
                 # 4. Manually Create the Service File (Replacing 'service install')
@@ -1306,6 +1340,8 @@ WantedBy=multi-user.target
                     
                     if current_version == version_tag:
                         return f"[SKIP] {s['ip']} is already running the latest version ({version_tag})."
+                else:
+                    return f"[ERROR] {s['ip']} failed to upgrad to conduit version {version_tag}."
                 # --------------------------------
 
                 # 2. Cleanup & Stop (Only runs if version is different or binary missing)
@@ -1319,18 +1355,40 @@ WantedBy=multi-user.target
                 run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
                 run_cmd("chmod +x /opt/conduit/conduit")
 
-                if conduit_release == 'pre_release':
-                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
-                    cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
-                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-                    run_cmd("systemctl daemon-reload")                    
+                # Official psiphon release uses the simplified command
+                cmd_parts = [
+                    "/opt/conduit/conduit start",
+                    f"--max-clients {self.params['clients']}",
+                    f"--bandwidth {self.params['bw']}",
+                    "--data-dir /var/lib/conduit"
+                ]
 
-                if conduit_release != 'pre_release':
-                    if self.params['update']:
-                        cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
+                if conduit_release != "psiphon":
+                    # uses the extra config, geo, and stats flags
+                    cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+
+                    if conduit_release == "byte_release":
+                        # allows conduit to log bytes instead of KMGT
+                        cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                
+                    if AppState.use_lion_sun:
+                        # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
+                        cmd_parts.append("--compartment shirokhorshid")
+
+                exec_cmd = " ".join(cmd_parts)
+
+                if conduit_release == 'byte_release':
+                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
+#                cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
+                run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service")
+                run_cmd("systemctl daemon-reload")                    
+
+#                if conduit_release != 'pre_release':
+#                    if self.params['update']:
+#                        cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
                     
-                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-                    run_cmd("systemctl daemon-reload")
+#                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
+#                    run_cmd("systemctl daemon-reload")
 
                 # 5. Start
                 run_cmd("systemctl start conduit", hide=True)      
@@ -1417,12 +1475,16 @@ class ConduitGUI(QMainWindow):
         
         layout.addLayout(file_box)
 
-        cfg_frame = QFrame(); cfg_frame.setFrameShape(QFrame.StyledPanel)
-        cfg_lay = QHBoxLayout(cfg_frame)
+        cfgs_frame = QFrame(); 
+        cfgs_frame.setFrameShape(QFrame.StyledPanel)
+#        cfgs_lay = QVBoxLayout(cfgs_frame)
+        cfg_lay = QHBoxLayout(cfgs_frame)
+#        cfg_lay = QHBoxLayout()
+        cfg2_lay = QHBoxLayout()
 
     # Helper to apply consistent width for the 4 entries
         def set_fixed_entry(widget):
-            widget.setFixedWidth(80)
+            widget.setFixedWidth(60)
             return widget
 
         cfg_lay.addWidget(QLabel("Max Clients:"));
@@ -1464,6 +1526,12 @@ class ConduitGUI(QMainWindow):
         self.chk_upd.setToolTip("Checked and Click on Re-Start (if server is running) or Start to update the Max Clients and Bandwidth")
         cfg_lay.addWidget(self.chk_upd)
         self.chk_upd.setChecked(True)
+
+        self.chk_lion_sun = QCheckBox("Sun && Lion")
+        self.chk_lion_sun.setToolTip("When checked only the Shir O Khorshid Android Client app can connect to Conduit server")
+        cfg_lay.addWidget(self.chk_lion_sun)
+        self.chk_lion_sun.setChecked(False)
+
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
         self.rad_name.setChecked(True)
@@ -1471,7 +1539,9 @@ class ConduitGUI(QMainWindow):
         cfg_lay.addWidget(self.rad_ip)
         cfg_lay.addStretch(1)
 
-        layout.addWidget(cfg_frame)
+#        cfgs_lay.addLayout(cfg_lay)
+#        cfgs_lay.addLayout(cfg2_lay)
+        layout.addWidget(cfgs_frame)
 
         lists_lay = QHBoxLayout()
         self.pool = QListWidget(); self.sel = QListWidget()
@@ -1631,6 +1701,7 @@ class ConduitGUI(QMainWindow):
         self.btn_to_pool.clicked.connect(self.move_to_pool)
         self.btn_del.clicked.connect(self.delete_srv)
         self.btn_quit.clicked.connect(self.close)
+        self.chk_lion_sun.clicked.connect(self.lion_sun_status)
         
 #        self.rad_name.toggled.connect(self.sync_ui)
 #        self.rad_ip.toggled.connect(self.sync_ui)
@@ -1664,6 +1735,13 @@ class ConduitGUI(QMainWindow):
         self.sel.itemDoubleClicked.connect(self.edit_srv)
 
         self.update_timer_interval() # Initialize timer
+
+    def lion_sun_status(self):
+
+        if self.chk_lion_sun.checkState() != 2:
+            AppState.use_lion_sun = False
+        else:
+            AppState.use_lion_sun = True
 
     def handle_item_click(self, item):
         """Updates tracker and ensures only one list has an active selection."""
