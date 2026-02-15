@@ -36,11 +36,12 @@ if platform.system() == "Darwin":  # Darwin is the internal name for macOS
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     print("[INFO] macOS High-DPI Scaling Enabled")
 
-conduit_release = "pre_release"
-#conduit_release = "official"
+#conduit_release = "pre_release"
+conduit_release = "official"
 
 if conduit_release == "official":
-    CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/2fd31d4/conduit-linux-amd64"
+#    CONDUIT_URL = "https://github.com/ssmirr/conduit/releases/download/d399071/conduit-linux-amd64"
+    CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/d399071/conduit"
 else:
     CONDUIT_URL = "https://github.com/Starling226/conduit/releases/download/experimental-pr11/conduit"
 
