@@ -562,7 +562,7 @@ class ServerWorker(QThread):
 
             if conduit_release != "psiphon":
                 # uses the extra config, geo, and stats flags
-                cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+                cmd_parts.append("--geo --stats-file stats.json")
 
                 if conduit_release == "byte_release":
                     # allows conduit to log bytes instead of KMGT
@@ -1056,7 +1056,7 @@ class DeployWorker(QThread):
 
             if conduit_release != "psiphon":
                 # uses the extra config, geo, and stats flags
-                cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+                cmd_parts.append("--geo --stats-file stats.json")
 
                 if conduit_release == "byte_release":
                     # allows conduit to log bytes instead of KMGT
@@ -1365,7 +1365,7 @@ WantedBy=multi-user.target
 
                 if conduit_release != "psiphon":
                     # uses the extra config, geo, and stats flags
-                    cmd_parts.append("--geo --stats-file /opt/conduit/stats.json")
+                    cmd_parts.append("--geo --stats-file stats.json")
 
                     if conduit_release == "byte_release":
                         # allows conduit to log bytes instead of KMGT
