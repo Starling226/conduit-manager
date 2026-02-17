@@ -51,10 +51,12 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 
 class AppState:
     use_lion_sun = False
+    use_sec_inst = False
+    conduit_id = ""
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -71,7 +73,7 @@ class ReportFetcher(QRunnable):
         ip = self.server['ip']
         try:
             current_year = datetime.now().year
-            remote_path = f"/opt/conduit/{current_year}-conduit.log"
+            remote_path = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log"
             
             # Simple stream and compress
             cmd = f"cat {remote_path} | gzip -c"
@@ -135,7 +137,7 @@ class ReportFetcher(QRunnable):
 
                 # Saving as .raw so the Visualizer knows it needs processing
 
-                with open(f"server_report_logs/{ip}.raw", "w", encoding='utf-8') as f:
+                with open(f"server_report_logs{AppState.conduit_id}/{ip}.raw", "w", encoding='utf-8') as f:
                     f.write(decoded_text)
                             
         except Exception as e:
@@ -157,7 +159,7 @@ class LogFetcher(QRunnable):
             # 1. Fetch only relevant lines from journal
 
             cmd = (
-                f"journalctl -u conduit.service --since '{self.days} days ago' --no-pager -o short-iso | "
+                f"journalctl -u conduit{AppState.conduit_id}.service --since '{self.days} days ago' --no-pager -o short-iso | "
                 f"gzip -c"
             )
 
@@ -208,7 +210,7 @@ class LogFetcher(QRunnable):
                 # Retrieve the "stringified" bytes
                 encoded_string = text_buffer.getvalue()
                 if not encoded_string:
-                    print(f"FAILED: server_logs/{ip}.raw")
+                    print(f"FAILED: server_logs{AppState.conduit_id}/{ip}.raw")
                     return
 
                 # Convert that string back to actual bytes using the same encoding
@@ -219,7 +221,7 @@ class LogFetcher(QRunnable):
                 decoded_text = raw_bytes.decode('utf-8')
 
 #                with open(f"server_logs/{ip}.raw", "w") as f:
-                with open(f"server_logs/{ip}.raw", "w", encoding='utf-8') as f:                    
+                with open(f"server_logs{AppState.conduit_id}/{ip}.raw", "w", encoding='utf-8') as f:                    
                     f.write(decoded_text)
                 
                             
@@ -249,8 +251,8 @@ class HistoryWorker(QThread):
 #        self.completed_count = 0
 
     def run(self):
-        if not os.path.exists("server_logs"):
-            os.makedirs("server_logs")
+        if not os.path.exists(f"server_logs{AppState.conduit_id}"):
+            os.makedirs(f"server_logs{AppState.conduit_id}")
 
         pool = QThreadPool.globalInstance()
         # Set max threads to number of servers or a reasonable limit (e.g., 20)
@@ -283,8 +285,8 @@ class ReportWorker(QThread):
 #        self.completed_count = 0
 
     def run(self):
-        if not os.path.exists("server_report_logs"):
-            os.makedirs("server_report_logs", exist_ok=True)
+        if not os.path.exists(f"server_report_logs{AppState.conduit_id}"):
+            os.makedirs(f"server_report_logs{AppState.conduit_id}", exist_ok=True)
 
         pool = QThreadPool.globalInstance()
         # Set max threads to number of servers or a reasonable limit (e.g., 20)
@@ -454,7 +456,7 @@ class AutoStatsWorker(QThread):
                     else:    
                         return conn.sudo(cmd, **kwargs)
 
-                status_check = run_cmd("systemctl is-active conduit.service",hide=True, warn=True)
+                status_check = run_cmd(f"systemctl is-active conduit{AppState.conduit_id}.service",hide=True, warn=True)
                 is_running = status_check.stdout.strip() == "active"
 
                 if not is_running:
@@ -463,7 +465,7 @@ class AutoStatsWorker(QThread):
                     return res
 
                 # 2. If running, get the logs for the requested window
-                cmd = f"journalctl -u conduit.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
+                cmd = f"journalctl -u conduit{AppState.conduit_id}.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
                 result = run_cmd(cmd, hide=True, timeout=15)
                 output = result.stdout.strip()
 
@@ -552,13 +554,13 @@ class ServerWorker(QThread):
 
             # Official psiphon release uses the simplified command
             cmd_parts = [
-                "/opt/conduit/conduit start",
+                f"/opt/conduit{AppState.conduit_id}/conduit start",
                 f"--max-clients {self.config['clients']}",
                 f"--bandwidth {self.config['bw']}",
-                "--data-dir /var/lib/conduit"
+                f"--data-dir /var/lib/conduit{AppState.conduit_id}"
             ]
 
-            service_file = "/etc/systemd/system/conduit.service"
+            service_file = f"/etc/systemd/system/conduit{AppState.conduit_id}.service"
 
             if conduit_release != "psiphon":
                 # uses the extra config, geo, and stats flags
@@ -566,7 +568,7 @@ class ServerWorker(QThread):
 
                 if conduit_release == "byte_release":
                     # allows conduit to log bytes instead of KMGT
-                    cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                    cmd_parts.append(f"--psiphon-config /opt/conduit{AppState.conduit_id}/psiphon_config.json")                
                 
                 if AppState.use_lion_sun:
                     # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
@@ -613,7 +615,7 @@ class ServerWorker(QThread):
                         return conn.sudo(cmd, **kwargs)
 
                 def get_conduit_stats():
-                    service_path = "/etc/systemd/system/conduit.service"
+                    service_path = f"/etc/systemd/system/conduit{AppState.conduit_id}.service"
     
                     # This command searches the ExecStart line for the flags and returns just the values
                     cmd = f"grep 'ExecStart' {service_path} | grep -oP '(?<=--max-clients )[0-9]+|(?<=--bandwidth )[0-9.]+'"
@@ -629,16 +631,16 @@ class ServerWorker(QThread):
 #                            print(f"Current Config: {max_clients} Clients @ {bandwidth} Mbps")
                             return f"max-clients: {max_clients} bandwidth: {bandwidth} Mbps"
     
-                    print("Failed to parse conduit service file.")
+                    print(f"Failed to parse conduit{AppState.conduit_id} service file.")
                     return f"max-clients: None bandwidth: None Mbps"
 
                 if self.action == "reset":
                     # 1. Stop the service
-                    run_cmd("systemctl stop conduit", hide=True, warn=True)
+                    run_cmd(f"systemctl stop conduit{AppState.conduit_id}", hide=True, warn=True)
                     time.sleep(2)
                     # 2. Wipe the data directory (CAUTION: Destructive)
                     # We use -rf to ensure it clears everything inside
-                    run_cmd("rm -rf /var/lib/conduit/*", hide=True, warn=True)
+                    run_cmd(f"rm -rf /var/lib/conduit{AppState.conduit_id}/*", hide=True, warn=True)
                     
                     # 3. Apply Config if requested 
 
@@ -654,12 +656,12 @@ class ServerWorker(QThread):
                         run_cmd("systemctl daemon-reload", hide=True, warn=True)
                     
                     # 4. Start service
-                    run_cmd("systemctl start conduit", hide=True, warn=True)
+                    run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True, warn=True)
                     return f"[!] {s['server']}: FULL RESET COMPLETE (Data wiped & restarted)."
 
                 if self.action == "status":
                     # 1. Get the standard systemctl status (Active/Inactive)
-                    status_res = run_cmd("systemctl is-active conduit", hide=True, warn=True)
+                    status_res = run_cmd(f"systemctl is-active conduit{AppState.conduit_id}", hide=True, warn=True)
                     current_status = status_res.stdout.strip() if status_res.ok else "inactive"
                     current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
 
@@ -673,7 +675,7 @@ class ServerWorker(QThread):
                         remote_time = "00-00-00 00-00-00"
 
                     # 2. Get the last 5 lines of the journal
-                    log_res = run_cmd("journalctl -u conduit.service -n 10 --no-pager", hide=True, warn=True)
+                    log_res = run_cmd(f"journalctl -u conduit{AppState.conduit_id}.service -n 10 --no-pager", hide=True, warn=True)
                     journal_logs = log_res.stdout if log_res.ok else "No logs found."
 
                     # 3. Combine them for the UI
@@ -682,7 +684,7 @@ class ServerWorker(QThread):
                     return output        
                 
                 if self.action == "stop":
-                    run_cmd("systemctl stop conduit", hide=True)
+                    run_cmd(f"systemctl stop conduit{AppState.conduit_id}", hide=True)
                     return f"[-] {s['server']} Stopped."
 
                 if self.action in ["start", "restart"]:
@@ -696,7 +698,7 @@ class ServerWorker(QThread):
                         run_cmd(sed_cmd, hide=True)
                         run_cmd("systemctl daemon-reload", hide=True)
                     
-                    run_cmd(f"systemctl {self.action} conduit", hide=True)
+                    run_cmd(f"systemctl {self.action} conduit{AppState.conduit_id}", hide=True)
                     return f"[+] {s['server']} {self.action.capitalize()}ed."
                 
         except Exception as e:
@@ -802,7 +804,7 @@ class StatsWorker(QThread):
 
                 # Command to get last 1 hour of raw stats
 #                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep '\\[STATS\\]'"
-                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
+                cmd = f"journalctl -u conduit{AppState.conduit_id}.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
 #                result = conn.run(cmd, hide=True, timeout=15)
                 result = run_cmd(cmd,hide=True, timeout=15)
                 output = result.stdout.strip()
@@ -1048,10 +1050,10 @@ class DeployWorker(QThread):
 
             # Official psiphon release uses the simplified command
             cmd_parts = [
-                "/opt/conduit/conduit start",
+                f"/opt/conduit{AppState.conduit_id}/conduit start",
                 f"--max-clients {self.params['clients']}",
                 f"--bandwidth {self.params['bw']}",
-                "--data-dir /var/lib/conduit"
+                f"--data-dir /var/lib/conduit{AppState.conduit_id}"
             ]
 
             if conduit_release != "psiphon":
@@ -1060,7 +1062,7 @@ class DeployWorker(QThread):
 
                 if conduit_release == "byte_release":
                     # allows conduit to log bytes instead of KMGT
-                    cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                    cmd_parts.append(f"--psiphon-config /opt/conduit{AppState.conduit_id}/psiphon_config.json")                
                 
                 if AppState.use_lion_sun:
                     # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
@@ -1094,53 +1096,58 @@ class DeployWorker(QThread):
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
 
                 # 1. Key Injection
+                if not AppState.use_sec_inst:
+                    run_cmd("mkdir -p ~/.ssh && chmod 700 ~/.ssh",hide=True)
+                    run_cmd(f'echo "{pub_key}" >> ~/.ssh/authorized_keys',hide=True)
+                    run_cmd("chmod 600 ~/.ssh/authorized_keys",hide=True)
                 
-                run_cmd("mkdir -p ~/.ssh && chmod 700 ~/.ssh",hide=True)
-                run_cmd(f'echo "{pub_key}" >> ~/.ssh/authorized_keys',hide=True)
-                run_cmd("chmod 600 ~/.ssh/authorized_keys",hide=True)
-                
-                os_check = run_cmd("grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"'", hide=True)
-                os_id = os_check.stdout.strip()
+                    os_check = run_cmd("grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '\"'", hide=True)
+                    os_id = os_check.stdout.strip()
 
-                if "rhel" in os_id or "rocky" in os_id or "almalinux" in os_id or "centos" in os_id or "fedora" in os_id:
-                    print("Detected RHEL-based system.")
-                    rh_distro = True
-                elif "debian" in os_id or "ubuntu" in os_id:
-                    print("Detected Debian-based system.")
-                    rh_distro = False
+                    if "rhel" in os_id or "rocky" in os_id or "almalinux" in os_id or "centos" in os_id or "fedora" in os_id:
+                        print("Detected RHEL-based system.")
+                        rh_distro = True
+                    elif "debian" in os_id or "ubuntu" in os_id:
+                        print("Detected Debian-based system.")
+                        rh_distro = False
 
-                # 2. Cleanup & Directory Prep
+                # 2. Cleanup & Directory Prep                
 
-                run_cmd("systemctl stop conduit", warn=True, hide=True)
+                run_cmd(f"systemctl stop conduit{AppState.conduit_id}", warn=True, hide=True)
                 time.sleep(2)
-                run_cmd("rm -f /opt/conduit/conduit", warn=True, hide=True)
-                run_cmd("mkdir -p /opt/conduit", hide=True)
+                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit", warn=True, hide=True)
+                run_cmd(f"mkdir -p /opt/conduit{AppState.conduit_id}", hide=True)
 
                 # Crucial: The service hardening requires this directory to exist beforehand
 
-                run_cmd("rm -rf /var/lib/conduit", warn=True, hide=True)
-                run_cmd("mkdir -p /var/lib/conduit", hide=True)
+                run_cmd(f"rm -rf /var/lib/conduit{AppState.conduit_id}", warn=True, hide=True)
+                run_cmd(f"mkdir -p /var/lib/conduit{AppState.conduit_id}", hide=True)
+                
+                if not AppState.use_sec_inst:
+                    # install system and network monitoring packages
 
-                # install system and network monitoring packages
+#                    if run_cmd("command -v dnf", warn=True, hide=True).ok:
+                    if rh_distro:
+                        run_cmd("dnf install epel-release -y", hide=True)
+                        run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
+                    else:
+#                        conn.run("apt-get update -y", hide=True)
+                        run_cmd("apt-get update -y", hide=True)
+                        run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
 
-#                if run_cmd("command -v dnf", warn=True, hide=True).ok:
-                if rh_distro:
-                    run_cmd("dnf install epel-release -y", hide=True)
-                    run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
-                else:
-#                    conn.run("apt-get update -y", hide=True)
-                    run_cmd("apt-get update -y", hide=True)
-                    run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
-
+                
                 # 3. Download Binary
 
-                run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)
-                run_cmd("chmod +x /opt/conduit/conduit")
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit {CONDUIT_URL}", hide=True)
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit")
 
                 if conduit_release == 'byte_release':
-                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
+                    run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 
                 # 4. Manually Create the Service File (Replacing 'service install')
+                WorkingDirectory = f"/opt/conduit{AppState.conduit_id}/"
+                ReadWritePaths=f"/var/lib/conduit{AppState.conduit_id}"
+
                 service_content = f"""[Unit]
 Description=Psiphon Conduit inproxy service - relays traffic for users in censored regions
 After=network-online.target
@@ -1153,13 +1160,13 @@ Restart=always
 RestartSec=10
 User=root
 Group=root
-WorkingDirectory=/opt/conduit/
+WorkingDirectory={WorkingDirectory}
 
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/var/lib/conduit
+ReadWritePaths={ReadWritePaths}
 PrivateTmp=true
 
 [Install]
@@ -1167,104 +1174,108 @@ WantedBy=multi-user.target
 """
                 # Escape single quotes in the content if any (though there are none currently)
                 # We use sudo tee to write to the protected system directory
-                run_cmd(f"echo '{service_content}' | sudo tee /etc/systemd/system/conduit.service > /dev/null")
+                run_cmd(f"echo '{service_content}' | sudo tee /etc/systemd/system/conduit{AppState.conduit_id}.service > /dev/null")
 
                 # 5. Reload, Enable, and Start
                 run_cmd("systemctl daemon-reload", hide=True)
-                run_cmd("systemctl enable conduit", hide=True)
-                run_cmd("systemctl start conduit", hide=True)
+                run_cmd(f"systemctl enable conduit{AppState.conduit_id}", hide=True)
+                run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)
                 
                 # 6. Download Stats Script from GitHub
                 # We use the 'raw' GitHub URL to get the actual code, not the HTML page
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
-                run_cmd(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
-                run_cmd("chmod +x /opt/conduit/get_conduit_stat.py")
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
+                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py"
 
-                config_path = "/etc/ssh/sshd_config"
-                cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
-                current_port_cmd = run_cmd(cmd, hide=True)
-                current_port = current_port_cmd.stdout.strip() or "22" # Default to 22 if not found
+#                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit{conduit_id}/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
+                run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
 
-                if str(port_num) == str(current_port):
-                    print(f"Port is already {port_num}. No changes needed.")
-                    return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
+                if not AppState.use_sec_inst:
+                    config_path = "/etc/ssh/sshd_config"
+                    cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
+                    current_port_cmd = run_cmd(cmd, hide=True)
+                    current_port = current_port_cmd.stdout.strip() or "22" # Default to 22 if not found
 
-                print(f"Changing SSH port from {current_port} to {port_num}...")
+                    if str(port_num) == str(current_port):
+                        print(f"Port is already {port_num}. No changes needed.")
+                        return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
+
+                    print(f"Changing SSH port from {current_port} to {port_num}...")
                     
-                # 1. Start the service
-                run_cmd("systemctl start firewalld", hide=True)
-                run_cmd("systemctl enable firewalld", hide=True)
+                    # 1. Start the service
+                    run_cmd("systemctl start firewalld", hide=True)
+                    run_cmd("systemctl enable firewalld", hide=True)
 
-                # 2. Loop until firewalld is actually running or we timeout
-                max_attempts = 10
-                attempts = 0
-                is_running = False
+                    # 2. Loop until firewalld is actually running or we timeout
+                    max_attempts = 10
+                    attempts = 0
+                    is_running = False
 
-                print("Waiting for firewalld to start...")
+                    print("Waiting for firewalld to start...")
 
-                while attempts < max_attempts:
-                    # Check status
-                    check = run_cmd("firewall-cmd --state", warn=True, hide=True)
+                    while attempts < max_attempts:
+                        # Check status
+                        check = run_cmd("firewall-cmd --state", warn=True, hide=True)
     
-                    # firewall-cmd --state returns exit code 0 if running
-                    if check.ok:
-                        is_running = True
-                        break
+                        # firewall-cmd --state returns exit code 0 if running
+                        if check.ok:
+                            is_running = True
+                            break
     
-                    attempts += 1
-                    time.sleep(1) # Short poll interval
+                        attempts += 1
+                        time.sleep(1) # Short poll interval
 
-                if is_running:
-                    print("Firewalld is active.")
-                    # Check if SELinux is active before running semanage
-                    if str(port_num) == "22":
-                        run_cmd("firewall-cmd --add-service=ssh --permanent", hide=True)
-                    else:                    
-                        selinux_check = run_cmd("getenforce", warn=True, hide=True)
+                    if is_running:
+                        print("Firewalld is active.")
+                        # Check if SELinux is active before running semanage
+                        if str(port_num) == "22":
+                            run_cmd("firewall-cmd --add-service=ssh --permanent", hide=True)
+                        else:                    
+                            selinux_check = run_cmd("getenforce", warn=True, hide=True)
 
-                        # getenforce returns "Enforcing", "Permissive", or "Disabled"
-                        if selinux_check.ok and "Disabled" not in selinux_check.stdout:
-                            print("SELinux is active. Updating policy...")
-                            # 2. Update the SELinux Policy to allow the new port
-                            run_cmd(f"semanage port -a -t ssh_port_t -p tcp {port_num}", warn=True)
-                        else:
-                            print("SELinux is disabled or not installed. Skipping policy update.")                    
+                            # getenforce returns "Enforcing", "Permissive", or "Disabled"
+                            if selinux_check.ok and "Disabled" not in selinux_check.stdout:
+                                print("SELinux is active. Updating policy...")
+                                # 2. Update the SELinux Policy to allow the new port
+                                run_cmd(f"semanage port -a -t ssh_port_t -p tcp {port_num}", warn=True)
+                            else:
+                                print("SELinux is disabled or not installed. Skipping policy update.")                    
 
-                        # 3. Open the new port in the firewall
-                        run_cmd(f"firewall-cmd --add-port={port_num}/tcp --permanent", hide=True)
+                            # 3. Open the new port in the firewall
+                            run_cmd(f"firewall-cmd --add-port={port_num}/tcp --permanent", hide=True)
 
-                        if str(current_port) == "22":
-                            # 4. Remove the old SSH service from the firewall
-                            run_cmd("firewall-cmd --remove-service=ssh --permanent", hide=True)
-                        else:
-                             # 4. Cleanup: Remove the OLD port/service from firewall                             
-                            run_cmd(f"firewall-cmd --remove-port={current_port}/tcp --permanent", hide=True)                                                
+                            if str(current_port) == "22":
+                                # 4. Remove the old SSH service from the firewall
+                                run_cmd("firewall-cmd --remove-service=ssh --permanent", hide=True)
+                            else:
+                                 # 4. Cleanup: Remove the OLD port/service from firewall                             
+                                run_cmd(f"firewall-cmd --remove-port={current_port}/tcp --permanent", hide=True)                                                
 
-                        # 5. Reload firewall to apply changes
-                        run_cmd("firewall-cmd --reload", hide=True)
+                            # 5. Reload firewall to apply changes
+                            run_cmd("firewall-cmd --reload", hide=True)
 
-                else:
-                    print("Firewalld is NOT running. Skipping firewall rules.")
+                    else:
+                        print("Firewalld is NOT running. Skipping firewall rules.")
+  
+                    # 6. Update the SSH configuration File
+                    # This regex replaces the existing active Port line regardless of what the number was
+                    sed_cmd = f"sed -i 's/^Port {current_port}/Port {port_num}/' {config_path}"
+                    # If the line was commented out (default), we use your previous regex
+                    if current_port == "22":
+                        sed_cmd = f"sed -i 's/^#\\?Port 22.*/Port {port_num}/' {config_path}"
 
-                # 6. Update the SSH configuration File
-                # This regex replaces the existing active Port line regardless of what the number was
-                sed_cmd = f"sed -i 's/^Port {current_port}/Port {port_num}/' {config_path}"
-                # If the line was commented out (default), we use your previous regex
-                if current_port == "22":
-                    sed_cmd = f"sed -i 's/^#\\?Port 22.*/Port {port_num}/' {config_path}"
+                    run_cmd(sed_cmd, hide=True)
 
-                run_cmd(sed_cmd, hide=True)
-
-                # 7. Restart SSH service to apply config changes
-                if rh_distro:
-                    run_cmd("systemctl restart sshd", hide=True)
-                else:
-                    run_cmd("systemctl restart ssh", hide=True)
+                     # 7. Restart SSH service to apply config changes
+                    if rh_distro:
+                        run_cmd("systemctl restart sshd", hide=True)
+                    else:
+                        run_cmd("systemctl restart ssh", hide=True)
                     
 #                if pwd:
 #                    self.remove_password_signal.emit(s['ip'])
@@ -1332,7 +1343,7 @@ WantedBy=multi-user.target
                 
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
-                v_check = run_cmd("/opt/conduit/conduit --version", hide=True, warn=True)
+                v_check = run_cmd(f"/opt/conduit{AppState.conduit_id}/conduit --version", hide=True, warn=True)
                 
                 if v_check.ok:
                     # Extract the hash from "conduit version e421eff"
@@ -1347,20 +1358,20 @@ WantedBy=multi-user.target
                 # 2. Cleanup & Stop (Only runs if version is different or binary missing)
                 self.log_signal.emit(f"[{s['ip']}] Upgrading {current_version} -> {version_tag}...")
                 
-                run_cmd("systemctl stop conduit", warn=True, hide=True)
+                run_cmd(f"systemctl stop conduit{AppState.conduit_id}", warn=True, hide=True)
                 time.sleep(2)
-                run_cmd("rm -f /opt/conduit/conduit", warn=True, hide=True)
+                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit", warn=True, hide=True)
 
                 # 3. Download Binary
-                run_cmd(f"curl -L -o /opt/conduit/conduit {CONDUIT_URL}", hide=True)                
-                run_cmd("chmod +x /opt/conduit/conduit")
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit {CONDUIT_URL}", hide=True)                
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit")
 
                 # Official psiphon release uses the simplified command
                 cmd_parts = [
-                    "/opt/conduit/conduit start",
+                    f"/opt/conduit{AppState.conduit_id}/conduit start",
                     f"--max-clients {self.params['clients']}",
                     f"--bandwidth {self.params['bw']}",
-                    "--data-dir /var/lib/conduit"
+                    f"--data-dir /var/lib/conduit{AppState.conduit_id}"
                 ]
 
                 if conduit_release != "psiphon":
@@ -1369,7 +1380,7 @@ WantedBy=multi-user.target
 
                     if conduit_release == "byte_release":
                         # allows conduit to log bytes instead of KMGT
-                        cmd_parts.append("--psiphon-config /opt/conduit/psiphon_config.json")                
+                        cmd_parts.append(f"--psiphon-config /opt/conduit{AppState.conduit_id}/psiphon_config.json")                
                 
                     if AppState.use_lion_sun:
                         # allows only Shir o Khorshid android clients in "Conduit Mode" settings to be connected
@@ -1378,9 +1389,9 @@ WantedBy=multi-user.target
                 exec_cmd = " ".join(cmd_parts)
 
                 if conduit_release == 'byte_release':
-                    run_cmd(f"curl -L -o /opt/conduit/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
+                    run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 #                cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
-                run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit.service")
+                run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit{AppState.conduit_id}.service")
                 run_cmd("systemctl daemon-reload")                    
 
 #                if conduit_release != 'pre_release':
@@ -1391,15 +1402,15 @@ WantedBy=multi-user.target
 #                    run_cmd("systemctl daemon-reload")
 
                 # 5. Start
-                run_cmd("systemctl start conduit", hide=True)      
+                run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)      
                 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
-                run_cmd(f"curl -L -o /opt/conduit/get_conduit_stat.py {stats_script_url}", hide=True)
-                run_cmd("chmod +x /opt/conduit/get_conduit_stat.py")
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
     
                 current_year = datetime.now().year
-                filename = f"/opt/conduit/{current_year}-conduit.log"
-                backup_log = f"/opt/conduit/{current_year}-conduit.log.bak"
+                filename = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log"
+                backup_log = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log.bak"
                 
                 # Check if file exists (-f) then move (mv)
                 result = run_cmd(f'test -f {filename}', warn=True, hide=True)
@@ -1426,7 +1437,7 @@ class ConduitGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Conduit Manager")
-        self.setMinimumSize(1100, 800)
+        self.setMinimumSize(1200, 800)
         self.server_data = [] 
         self.current_path = ""
 
@@ -1522,7 +1533,7 @@ class ConduitGUI(QMainWindow):
         # ------------------------------
 
         cfg_lay.addSpacing(10)
-        self.chk_upd = QCheckBox("Apply Config Changes")
+        self.chk_upd = QCheckBox("Update Config")
         self.chk_upd.setToolTip("Checked and Click on Re-Start (if server is running) or Start to update the Max Clients and Bandwidth")
         cfg_lay.addWidget(self.chk_upd)
         self.chk_upd.setChecked(True)
@@ -1531,6 +1542,11 @@ class ConduitGUI(QMainWindow):
         self.chk_lion_sun.setToolTip("When checked only the Shir O Khorshid Android Client app can connect to Conduit server")
         cfg_lay.addWidget(self.chk_lion_sun)
         self.chk_lion_sun.setChecked(False)
+
+        self.chk_sec_inst = QCheckBox("Secondary")
+        self.chk_sec_inst.setToolTip("When checked it manages the secondary running conduit instance")
+        cfg_lay.addWidget(self.chk_sec_inst)
+        self.chk_sec_inst.setChecked(False)
 
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
@@ -1702,6 +1718,8 @@ class ConduitGUI(QMainWindow):
         self.btn_del.clicked.connect(self.delete_srv)
         self.btn_quit.clicked.connect(self.close)
         self.chk_lion_sun.clicked.connect(self.lion_sun_status)
+        self.chk_sec_inst.clicked.connect(self.secondary_conduit_instance_status)
+        
         
 #        self.rad_name.toggled.connect(self.sync_ui)
 #        self.rad_ip.toggled.connect(self.sync_ui)
@@ -1736,12 +1754,22 @@ class ConduitGUI(QMainWindow):
 
         self.update_timer_interval() # Initialize timer
 
+
     def lion_sun_status(self):
 
         if self.chk_lion_sun.checkState() != 2:
             AppState.use_lion_sun = False
         else:
             AppState.use_lion_sun = True
+
+    def secondary_conduit_instance_status(self):
+
+        if self.chk_sec_inst.checkState() != 2:
+            AppState.use_sec_inst = False
+            AppState.conduit_id=""
+        else:
+            AppState.use_sec_inst = True
+            AppState.conduit_id="2"
 
     def handle_item_click(self, item):
         """Updates tracker and ensures only one list has an active selection."""
@@ -2127,6 +2155,8 @@ class ConduitGUI(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             default_port = True
+            AppState.use_sec_inst = False
+            self.chk_sec_inst.setChecked(False)
         else:
             default_port = False
 
@@ -2291,7 +2321,7 @@ class ConduitGUI(QMainWindow):
             QMessageBox.warning(self, "Reset", "No servers selected in the right-side list.")
             return
         
-        msg = f"WARNING: This will stop the service and DELETE ALL DATA in /var/lib/conduit/ on {len(targets)} server(s).\n\nAre you absolutely sure?"
+        msg = f"WARNING: This will stop the service and DELETE ALL DATA in /var/lib/conduit{AppState.conduit_id}/ on {len(targets)} server(s).\n\nAre you absolutely sure?"
         reply = QMessageBox.critical(self, "Confirm Full Reset", msg, 
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
 
@@ -3140,7 +3170,7 @@ class VisualizerWindow(QMainWindow):
 
     def get_last_log_time(self, ip):
         """Reads the very last line of a local log file to get the timestamp."""
-        file_path = f"server_logs/{ip}.log"
+        file_path = f"server_logs{AppState.conduit_id}/{ip}.log"
         if not os.path.exists(file_path):
             return None
         try:
@@ -3190,7 +3220,7 @@ class VisualizerWindow(QMainWindow):
         self.allow_network = True  # Enable network mode
         self.set_status_color("dark") # Change color to dark as requested
         
-        os.makedirs("server_logs", exist_ok=True)
+        os.makedirs(f"server_logs{AppState.conduit_id}", exist_ok=True)
         days = self.edit_days.text()
         self.btn_reload.setEnabled(False)
 #        self.progress_bar.setVisible(True)
@@ -3247,8 +3277,8 @@ class VisualizerWindow(QMainWindow):
         Takes the raw journalctl output and converts it to a clean tab-separated log.
         This runs on the local machine after all downloads are finished.
         """
-        raw_path = f"server_logs/{ip}.raw"
-        log_path = f"server_logs/{ip}.log"
+        raw_path = f"server_logs{AppState.conduit_id}/{ip}.raw"
+        log_path = f"server_logs{AppState.conduit_id}/{ip}.log"
     
         if not os.path.exists(raw_path):
             return
@@ -3475,7 +3505,7 @@ class VisualizerWindow(QMainWindow):
         all_epochs = []
         for server in actual_servers:
             ip = server['ip']
-            file_path = f"server_logs/{ip}.log"
+            file_path = f"server_logs{AppState.conduit_id}/{ip}.log"
             if os.path.exists(file_path):
                 data = self.parse_log_file(file_path)
                 self.data_cache[ip] = data
@@ -3889,7 +3919,7 @@ class VisualizerReportWindow(QMainWindow):
 
     def get_last_log_time(self, ip):
         """Reads the very last line of a local log file to get the timestamp."""
-        file_path = f"server_report_logs/{ip}.log"
+        file_path = f"server_report_logs{AppState.conduit_id}/{ip}.log"
         if not os.path.exists(file_path):
             return None
         try:
@@ -4006,8 +4036,8 @@ class VisualizerReportWindow(QMainWindow):
         Takes the raw journalctl output and converts it to a clean tab-separated log.
         This runs on the local machine after all downloads are finished.
         """
-        raw_path = f"server_report_logs/{ip}.raw"
-        log_path = f"server_report_logs/{ip}.log"
+        raw_path = f"server_report_logs{AppState.conduit_id}/{ip}.raw"
+        log_path = f"server_report_logs{AppState.conduit_id}/{ip}.log"
     
         if not os.path.exists(raw_path):
             return
@@ -4288,7 +4318,7 @@ class VisualizerReportWindow(QMainWindow):
         all_epochs = []
         for server in actual_servers:
             ip = server['ip']
-            file_path = f"server_report_logs/{ip}.log"
+            file_path = f"server_report_logs{AppState.conduit_id}/{ip}.log"
             if os.path.exists(file_path):
                 print(f"Reading: {ip}")
                 data = self.parse_log_file(file_path)
