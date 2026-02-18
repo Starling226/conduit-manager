@@ -10,14 +10,15 @@ import statistics
 import ipaddress
 import numpy as np
 import json
+import requests
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout,
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, QInputDialog,
                              QCheckBox, QListWidget, QListWidgetItem, QPlainTextEdit, 
                              QFileDialog, QMessageBox, QFrame, QAbstractItemView, 
-                             QRadioButton, QButtonGroup, QDialog, QFormLayout, 
-                             QTableWidgetItem, QTableWidget, QHeaderView)
+                             QRadioButton, QButtonGroup, QDialog, QFormLayout,QProgressBar, 
+                             QTableWidgetItem, QTableWidget, QHeaderView, QScrollArea)
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QRunnable, QThreadPool
 from PyQt5.QtGui import QFont
@@ -28,6 +29,7 @@ from pyqtgraph import DateAxisItem
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
+
 
 # --- PLATFORM SPECIFIC FIXES ---
 if platform.system() == "Darwin":  # Darwin is the internal name for macOS
@@ -51,7 +53,7 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.3.3"
+APP_VERSION = "2.4.0"
 
 class AppState:
     use_lion_sun = False
@@ -986,7 +988,7 @@ class DeployWorker(QThread):
     log_signal = pyqtSignal(str)
     remove_password_signal = pyqtSignal(str)
 
-    def __init__(self, action, targets, params):
+    def __init__(self, action, targets, params, client_ip):
         super().__init__()
         self.targets = targets
         self.params = params # password, max_clients, bandwidth, user
@@ -1129,11 +1131,11 @@ class DeployWorker(QThread):
 #                    if run_cmd("command -v dnf", warn=True, hide=True).ok:
                     if rh_distro:
                         run_cmd("dnf install epel-release -y", hide=True)
-                        run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs -y", hide=True)
+                        run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs glances python3-bottle -y", hide=True)
                     else:
 #                        conn.run("apt-get update -y", hide=True)
                         run_cmd("apt-get update -y", hide=True)
-                        run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs -y", hide=True)
+                        run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs glances python3-bottle -y", hide=True)
 
                 
                 # 3. Download Binary
@@ -1195,6 +1197,30 @@ WantedBy=multi-user.target
 #                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit{conduit_id}/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
 
+                #8. setting up the Systemd service for glances
+            
+                service_config = """[Unit]
+Description=Glances Web Server
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/glances -w -B 0.0.0.0
+Restart=always
+
+[Install]
+WantedBy=multi-user.target"""
+            
+                # 9. Write service file and start
+                run_cmd(f"echo '{service_config}' | sudo tee /etc/systemd/system/glancesweb.service", hide=True)
+                run_cmd("systemctl daemon-reload", hide=True)
+                run_cmd("systemctl enable --now glancesweb.service", hide=True)
+            
+                run_cmd("firewall-cmd --add-port=61208/tcp --permanent", hide=True)
+                cmd = f"""firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="{client_ip}" port protocol="tcp" port="61208" accept'"""
+                run_cmd(cmd, hide=True)
+                run_cmd("firewall-cmd --reload", hide=True)
+
+                # 9. customizing thhe ssh port number
                 if not AppState.use_sec_inst:
                     config_path = "/etc/ssh/sshd_config"
                     cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
@@ -1654,12 +1680,17 @@ class ConduitGUI(QMainWindow):
         self.btn_reset.setToolTip("Use if clients not added after hours or server waiting to connect.")        
 
         self.btn_stats = QPushButton("Statistics")
-        self.btn_stats.setStyleSheet("background-color: #2c3e50; color: white; font-weight: bold;")
+        self.btn_stats.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
 
         self.btn_report = QPushButton("Report")
         self.btn_report.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
         self.btn_report.clicked.connect(self.open_report)
         cfg_lay.addWidget(self.btn_report)
+
+        self.btn_health = QPushButton("Health")
+        self.btn_health.setStyleSheet("background-color: #a3cb38; color: white; font-weight: bold;")
+        self.btn_health.clicked.connect(self.open_system_health_dashboard)
+        cfg_lay.addWidget(self.btn_health)
 
         self.btn_visualize = QPushButton("Traffic")
         self.btn_visualize.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
@@ -1672,11 +1703,13 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade = QPushButton("Upgrade")
 #        self.btn_upgrade.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
 #        self.btn_upgrade.setStyleSheet("background-color: #8e44ad; color: white; font-weight: bold;")
-        self.btn_upgrade.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
+
+#        self.btn_upgrade.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold;")
+        self.btn_upgrade.setStyleSheet("background-color: #f1c40f; color: white; font-weight: bold;")
         self.btn_upgrade.setToolTip("Upgrade the conduit to the version displayed in GUI.")      
 
 #        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_quit]:
-        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_visualize, self.btn_report]:            
+        for b in [self.btn_start, self.btn_stop, self.btn_re, self.btn_reset, self.btn_stat, self.btn_upgrade, self.btn_stats, self.btn_deploy, self.btn_health, self.btn_visualize, self.btn_report]:            
             ctrl_lay.addWidget(b)
         layout.addLayout(ctrl_lay)
 
@@ -1817,14 +1850,42 @@ class ConduitGUI(QMainWindow):
         if not hasattr(self, 'rep_window'):
             self.report_window = VisualizerReportWindow(self.server_data, self.console)
         self.report_window.show()
+        self.report_window.raise_() # Bring to front
+
         # Trigger initial fetch for current day
 #        self.viz_window.start_data_fetch()
 
+    def open_system_health_dashboard(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        json_file = os.path.join(base_dir, 'servers.json')
+        display_mode = 'server' if self.rad_name.isChecked() else 'ip'
+        
+        if not hasattr(self, 'health_window'):
+            self.health_window = ConduitDashboard(self.console, display_mode, json_file)
+        else:
+            # Tell the existing window to switch modes
+            self.health_window.set_display_mode(display_mode)
+            
+        self.health_window.show()
+        self.health_window.raise_() # Bring to front
+
+    '''
+    def open_system_health_dashboard(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        json_file = os.path.join(base_dir, 'servers.json')
+
+        display_mode = 'server' if self.rad_name.isChecked() else 'ip'
+        
+        if not hasattr(self, 'health_window'):
+            self.health_window = ConduitDashboard(self.console, display_mode, json_file)
+        self.health_window.show()
+    '''
 
     def open_visualizer(self):
         if not hasattr(self, 'viz_window'):
             self.viz_window = VisualizerWindow(self.server_data, self.console)
         self.viz_window.show()
+        self.viz_window.raise_() # Bring to front
         # Trigger initial fetch for current day
 #        self.viz_window.start_data_fetch()
 
@@ -2172,7 +2233,7 @@ class ConduitGUI(QMainWindow):
         self.btn_deploy.setEnabled(False)
         self.btn_deploy.setText("Deploying...")
         
-        self.deploy_thread = DeployWorker("deploy",valid_targets, params)
+        self.deploy_thread = DeployWorker("deploy",valid_targets, params, client_ip)
         self.deploy_thread.log_signal.connect(lambda m: self.console.appendPlainText(m))
 #        self.deploy_thread.remove_password_signal.connect(self.remove_password_from_file)
         self.deploy_thread.finished.connect(lambda: self.btn_deploy.setEnabled(True))
@@ -4436,6 +4497,272 @@ class VisualizerReportWindow(QMainWindow):
             print(f"Error parsing {file_path}: {e}")
             return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
 
+
+# --- 1. Targeted Firewall Repair Worker ---
+class RepairWorker(QThread):
+    finished = pyqtSignal(str, bool)
+
+    def __init__(self, name, entry):
+        super().__init__()
+        self.name = name
+        self.entry = entry
+
+    def run(self):
+        try:
+            local_ip = requests.get("https://api.ipify.org", timeout=5).text
+            ip, user = self.entry['ip'], self.entry['user']
+            port = self.entry.get('port', 22)
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+
+            conn = Connection(host=ip, user=user, port=port,
+                              connect_kwargs={"key_filename": key_path, "timeout": 7})
+            
+            # Clean old rules for port 61208 and add the new one
+            # Note: We use 'sudo' here assuming root or sudoer access
+            rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
+            for line in rules.splitlines():
+                if 'port="61208"' in line:
+                    conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+            
+            new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
+            conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+            conn.sudo("firewall-cmd --reload", hide=True)
+            conn.sudo("systemctl restart glancesweb", warn=True, hide=True)
+            
+            conn.close()
+            self.finished.emit(self.name, True)
+        except Exception:
+            self.finished.emit(self.name, False)
+
+# --- 2. Live Monitoring Worker (Smart Detection) ---
+class GlancesWorker(QThread):
+    stats_updated = pyqtSignal(str, float, float)
+    needs_repair = pyqtSignal(str) # Signal to UI that we need a firewall fix
+
+    def __init__(self, name, entry):
+        super().__init__()
+        self.name = name
+        self.entry = entry
+        self.ip = entry['ip']
+        self.fail_count = 0
+        self.is_repairing = False
+
+    def run(self):
+        while True:
+            if not self.is_repairing:
+                try:
+                    r = requests.get(f"http://{self.ip}:61208/api/3/all", timeout=2)
+                    if r.status_code == 200:
+                        data = r.json()
+                        self.stats_updated.emit(self.name, data['cpu']['total'], data['mem']['percent'])
+                        self.fail_count = 0
+                    else:
+                        raise Exception("Bad Status")
+                except:
+                    self.fail_count += 1
+                    self.stats_updated.emit(self.name, 0.0, 0.0)
+                    
+                    # If failed 3 times, request a repair
+                    if self.fail_count >= 3:
+                        self.is_repairing = True
+                        self.needs_repair.emit(self.name)
+            
+            self.sleep(5)
+
+# --- 3. UI Components (Same as before) ---
+
+class ServerTile(QWidget):
+    def __init__(self, name, ip, display_mode="server", parent=None):
+        super().__init__(parent)
+        self.server_name = name
+        self.ip_address = ip
+        self.display_mode = display_mode 
+        
+        header_text = self.server_name.upper() if self.display_mode == "server" else self.ip_address
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        # Header Label - Curved top corners
+        self.name_label = QLabel(header_text)
+        self.name_label.setAlignment(Qt.AlignCenter)
+        self.name_label.setFixedHeight(14) 
+        # Added border-top-left-radius and border-top-right-radius
+        self.name_label.setStyleSheet("""
+            font-weight: bold; color: #FFFFFF; font-size: 11px; 
+            background-color: #2c3e50; 
+            border-top-left-radius: 4px; border-top-right-radius: 4px;
+        """)
+        layout.addWidget(self.name_label)
+
+        # Combined Stats Label - Square (middle element)
+        self.stats_label = QLabel("CPU: --%  MEM: --%")
+        self.stats_label.setAlignment(Qt.AlignCenter)
+        self.stats_label.setFixedHeight(14)
+        self.stats_label.setStyleSheet("color: #FFFFFF; font-weight: 500; font-size: 9px; background-color: #2c3e50;")
+        layout.addWidget(self.stats_label)
+
+        # CPU Bar
+        self.cpu_bar = QProgressBar()
+        self.cpu_bar.setFixedHeight(14)
+        self.cpu_bar.setFormat("  CPU")
+        self.cpu_bar.setTextVisible(True)
+        self.cpu_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.cpu_bar)
+
+        # Memory Bar - Curved bottom corners
+        self.mem_bar = QProgressBar()
+        self.mem_bar.setFixedHeight(14)
+        self.mem_bar.setFormat("  MEM")
+        self.mem_bar.setTextVisible(True)
+        self.mem_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.mem_bar)
+
+        # Main Tile Container
+        self.setStyleSheet("background-color: #1c2833; border-radius: 6px; border: 1px solid #34495e;")
+
+    def update_ui(self, cpu, mem):
+        # 1. THE FIX: Re-apply 'Live' styles to labels to clear blackout
+        live_label_bg = "background-color: #2c3e50; color: #FFFFFF; font-weight: bold;"
+        
+        self.name_label.setStyleSheet(f"{live_label_bg} font-size: 11px; border-top-left-radius: 4px; border-top-right-radius: 4px;")
+        self.stats_label.setStyleSheet(f"{live_label_bg} font-size: 9px; font-weight: 500;")
+
+        # 2. Update Text and Values
+        self.stats_label.setText(f"CPU: {int(cpu)}%  MEM: {int(mem)}%")
+        self.cpu_bar.setValue(int(cpu))
+        self.mem_bar.setValue(int(mem))
+        
+        # 3. Bar Colors
+#        cpu_color = "#e74c3c" if cpu > 85 else "#2ecc71"
+#        mem_color = "#e74c3c" if mem > 85 else "#2ecc71"
+        
+        if cpu > 90 or mem > 90:
+            cpu_color = "#e74c3c" # Red Crimson
+            mem_color = "#e74c3c" # Red Crimson
+        elif cpu > 70 or mem > 70:
+            cpu_color = "#ffa500" # Orange
+            mem_color = "#ffa500" # Orange
+        else:
+            cpu_color = "#2ecc71" # Green
+            mem_color = "#2ecc71" # Green
+
+        # Ensure bars don't keep blackout borders
+        base_bar_style = "QProgressBar { background-color: #2c3e50; border: none; color: white; font-size: 8px; font-weight: bold; border-radius: 0px; } "
+        
+        self.cpu_bar.setStyleSheet(base_bar_style + f"QProgressBar::chunk {{ background-color: {cpu_color}; }}")
+        self.mem_bar.setStyleSheet(base_bar_style + f"QProgressBar::chunk {{ background-color: {mem_color}; border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }}")
+
+    def set_blackout_state(self):
+        # 1. Force Stats to 0%
+        self.stats_label.setText("CPU: 0%  MEM: 0%")
+        
+        # 2. Apply Blackout Style
+        black_bg = "background-color: #000000; color: #555; border: 1px solid #222;"
+        
+        self.name_label.setStyleSheet(f"font-size: 11px; border-top-left-radius: 4px; border-top-right-radius: 4px; {black_bg}")
+        self.stats_label.setStyleSheet(f"font-size: 9px; font-weight: 500; {black_bg}")
+        
+        # 3. Solid Black Bars
+        blackout_bar = "QProgressBar { background-color: #000000; border: 1px solid #222; color: #444; font-size: 8px; border-radius: 0px; } QProgressBar::chunk { background-color: #000000; }"
+        
+        self.cpu_bar.setValue(0)
+        self.mem_bar.setValue(0)
+        self.cpu_bar.setStyleSheet(blackout_bar)
+        self.mem_bar.setStyleSheet(blackout_bar)
+
+# --- 4. Main Window ---
+class ConduitDashboard(QMainWindow):
+    def __init__(self,console, display_mode="server",json_file="servers.json"):
+        super().__init__()
+
+# This ensures the dashboard uses Fusion even if the parent app doesn't
+        app = QApplication.instance()
+        if app:
+            app.setStyle(QStyleFactory.create("Fusion"))
+
+        self.console = console
+        self.display_mode = display_mode
+        self.setWindowTitle("System-Health Dashboard")
+        self.setGeometry(50, 50, 1300, 850)
+#        self.setStyleSheet("QMainWindow { background-color: #121212; }")
+        self.setStyleSheet("QMainWindow { background-color: #1e1e1e; }")
+
+        main_layout = QVBoxLayout()
+        container = QWidget()
+        container.setLayout(main_layout)
+        self.setCentralWidget(container)
+
+        scroll = QScrollArea()
+        scroll_content = QWidget()
+        self.grid = QGridLayout(scroll_content)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(scroll_content)
+        main_layout.addWidget(scroll)
+
+        self.tiles = {}
+        self.workers = {}
+        self.server_data = {} # To store original entry for repairs
+
+        self.load_and_start(json_file)
+
+    def set_display_mode(self, new_mode):
+        self.display_mode = new_mode
+        # Loop through all tiles and update their header text
+        for tile in self.tiles.values():
+            tile.display_mode = new_mode
+            # Refresh the text immediately
+            header_text = tile.server_name.upper() if new_mode == "server" else tile.ip_address
+            tile.name_label.setText(header_text)
+
+    def load_and_start(self,json_file):
+        try:
+            with open(json_file, 'r') as f:
+                servers = json.load(f)
+            
+            cols = 7
+            for i, entry in enumerate(servers):
+                name = entry['server']
+                self.server_data[name] = entry
+                
+                tile = ServerTile(name, entry['ip'],self.display_mode)
+#                tile = ServerTile(name, entry['ip'],display_mode="ip")
+                self.grid.addWidget(tile, i // cols, i % cols)
+                self.tiles[name] = tile
+
+                worker = GlancesWorker(name, entry)
+                worker.stats_updated.connect(self.update_tile)
+                worker.needs_repair.connect(self.trigger_repair)
+                worker.start()
+                self.workers[name] = worker
+        except Exception as e:
+            print(f"Startup error: {e}")
+
+    def update_tile(self, name, cpu, mem):
+        if name in self.tiles:
+            # If the API fails or returns zeros, trigger blackout
+            if cpu == 0.0 and mem == 0.0:
+                self.tiles[name].set_blackout_state()
+            else:
+                self.tiles[name].update_ui(cpu, mem)
+
+    def trigger_repair(self, name):
+        self.tiles[name].set_repairing(True)
+        # Launch repair in background so GUI stays smooth
+        repairer = RepairWorker(name, self.server_data[name])
+        repairer.finished.connect(self.on_repair_finished)
+        repairer.start()
+        # Prevent GC
+        setattr(self, f"repair_{name}", repairer)
+
+    def on_repair_finished(self, name, success):
+        self.tiles[name].set_repairing(False)
+        # Resume the monitor
+        if name in self.workers:
+            self.workers[name].fail_count = 0
+            self.workers[name].is_repairing = False
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); gui = ConduitGUI(); gui.show(); sys.exit(app.exec_())
