@@ -72,6 +72,9 @@ Here is the GUI interface for Conduit Management:
 ![Conduit Management Interface](screenshots/ConduitQt2.png)
 *(Screenshot showing Conduit network traffic feature)*
 
+![Conduit Management Interface](screenshots/ConduitQt3.png)
+*(Screenshot showing system health)*
+
 ### Running Python Script
 To run ConduitQt.py, simply double click on or run them in the command line terminal using the py command in Windows `py ConduitQt.py`, or python3 in Linux or macOS `python3 ConduitQt.py`.
 
@@ -124,6 +127,7 @@ After installation, the Psiphon network requires time for vetting and propagatio
 * **Status Table:** If the selection panel is empty you can highlight IP addresses in Status Table and directly do oprtaions. Click column header to sort ascending or descending.
 * **Traffic:** Traffic allows you to monitor network traffic across the individual servers. When you click on Traffic, it imports the server log files from local disk. Within the Visualizer window you can click on "Reload to retrieve the data" and it starts fetching the latest conduit logs from the servers. Please be patient, it may takes a couple of minutes to download the logs.
 * **Report:** Report allows you to download and display conduit hourly network traffic across the individual servers. When you click on Traffic, it imports the server hourly log files from local disk. Within the Visualizer window you can click on "Reload to retrieve the data" and it starts fetching the latest hourly logs from the servers. Please be patient, it may takes a couple of minutes to download the logs.
+* **Health:** Health display the current server health incluidng CPU and Memory usage for all the servers in real time in a new window. Depending on display mode it can display server name or IP address. You can change the display mode by clicking on Health Button, it quickly changes the display mode without launching a fresh window.
 * **Secondary:** If your bandwidth is not effectively used you can check this and deploy a new conduit instance. When checked every operation will be done on the seconday instance. This includes Traffic and Report Visualization. If a server does not have the second instance, it will be displayed in red color in Status Table and so, it will not be included in Traffic and Report graphs. You can switch between checked and unchecked to see the state of each group of instances. **Please note when deploying a server for the first time leave it as unchecked.**
 
 ## Important Notes
