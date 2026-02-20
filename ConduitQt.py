@@ -1366,7 +1366,7 @@ WantedBy=multi-user.target"""
                 res = run_cmd("id -u", hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
-                                
+                                            
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
                 v_check = run_cmd(f"/opt/conduit{AppState.conduit_id}/conduit --version", hide=True, warn=True)
@@ -1428,7 +1428,7 @@ WantedBy=multi-user.target"""
 #                    run_cmd("systemctl daemon-reload")
 
                 # 5. Start
-                run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)      
+                run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)                
                                 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
@@ -1451,7 +1451,6 @@ WantedBy=multi-user.target"""
                 cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
-
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
 
                 return f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}."
@@ -2113,6 +2112,7 @@ class ConduitGUI(QMainWindow):
         validated = self.get_validated_inputs()
         if not validated: return 
 
+        client_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
         valid_targets = []
 
         # THE WARNING GATE ---
@@ -2283,6 +2283,8 @@ class ConduitGUI(QMainWindow):
 
         valid_targets = []
 
+        client_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+
         # THE WARNING GATE ---
         target_names = ", ".join([s.get('server', s['ip']) for s in selected_targets])
         
@@ -2322,7 +2324,7 @@ class ConduitGUI(QMainWindow):
         self.btn_upgrade.setEnabled(False)
         self.btn_upgrade.setText("Upgrading...")
         
-        self.deploy_thread = DeployWorker("upgrade",selected_targets, params)
+        self.deploy_thread = DeployWorker("upgrade",selected_targets, params, client_ip)
         self.deploy_thread.log_signal.connect(lambda m: self.console.appendPlainText(m))
         self.deploy_thread.finished.connect(lambda: self.btn_upgrade.setEnabled(True))
         self.deploy_thread.finished.connect(lambda: self.btn_upgrade.setText("Upgrade"))
