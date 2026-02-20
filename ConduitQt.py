@@ -11,6 +11,7 @@ import ipaddress
 import numpy as np
 import json
 import requests
+import socket
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout,
@@ -4499,7 +4500,7 @@ class VisualizerReportWindow(QMainWindow):
 
 
 # --- 1. Targeted Firewall Repair Worker ---
-class RepairWorker(QThread):
+class RepairWorker2(QThread):
     finished = pyqtSignal(str, bool)
 
     def __init__(self, name, entry):
@@ -4536,9 +4537,120 @@ class RepairWorker(QThread):
             self.finished.emit(self.name, False)
 
 # --- 2. Live Monitoring Worker (Smart Detection) ---
+
+
+class RepairWorker(QThread):
+    finished = pyqtSignal(str, bool)
+
+    def __init__(self, name, entry):
+        super().__init__()
+        self.name = name
+        self.entry = entry
+
+    def run(self):
+        try:
+            local_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+            ip, user = self.entry['ip'], self.entry['user']
+            port = self.entry.get('port', 22)
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+
+            conn = Connection(host=ip, user=user, port=port,
+                              connect_kwargs={"key_filename": key_path, "timeout": 7})
+
+            # --- STEP 1: FIREWALL CHECK ---
+            check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
+            firewall_ok = conn.sudo(check_cmd, hide=True, warn=True).ok
+
+            if not firewall_ok:
+                print(f"[{self.name}] IP change/missing detected. Updating firewall...")
+                # Clean old rules
+                rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
+                for line in rules.splitlines():
+                    if 'port="61208"' in line:
+                        conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+                
+                # Add new rule
+                new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
+                conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+                conn.sudo("firewall-cmd --reload", hide=True)
+
+            # --- STEP 2: SERVICE HEALTH CHECK (Put it here!) ---
+            # Check if port is listening
+            port_active = conn.sudo("ss -tulpn | grep :61208", warn=True, hide=True).ok
+            
+            if port_active:
+                # Port is open, but is it "frozen"? Check API response locally
+                api_responsive = conn.run("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
+                if not api_responsive:
+                    print(f"[{self.name}] Service DEADLOCK detected. Restarting...")
+                    conn.sudo("systemctl restart glancesweb", hide=True)
+                else:
+                    print(f"[{self.name}] Service is healthy.")
+            else:
+                print(f"[{self.name}] Service is DOWN. Starting...")
+                conn.sudo("systemctl start glancesweb", hide=True)
+
+            conn.close()
+            self.finished.emit(self.name, True)
+            
+        except Exception as e:
+            print(f"Repair Error on {self.name}: {e}")
+            self.finished.emit(self.name, False)
+
+    def run2(self):
+        try:
+            # 1. Get current local public IP
+            local_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
+            
+            ip, user = self.entry['ip'], self.entry['user']
+            port = self.entry.get('port', 22)
+            home = os.path.expanduser("~")
+            key_path = os.path.join(home, ".ssh", "id_conduit")
+
+            conn = Connection(host=ip, user=user, port=port,
+                              connect_kwargs={"key_filename": key_path, "timeout": 7})
+            
+            # 2. Check if the current local_ip is already allowed for this port
+            # We search specifically for the rule containing both our IP and the port
+            check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
+            result = conn.sudo(check_cmd, hide=True, warn=True)
+
+            if result.ok:
+                # Our IP is already correctly configured! 
+                # Just ensure the service is running and exit.
+                print(f"[{self.name}] IP {local_ip} already authorized. Ensuring service is up...")
+                conn.sudo("systemctl start glancesweb", hide=True, warn=True)
+                conn.close()
+                self.finished.emit(self.name, True)
+                return
+
+            # 3. If we are here, the IP has changed or is missing.
+            # Clean out ONLY old rules that don't match our current IP
+            print(f"[{self.name}] IP change detected. Updating firewall to {local_ip}...")
+            rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
+            for line in rules.splitlines():
+                if 'port="61208"' in line:
+                    conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+            
+            # 4. Apply new rule
+            new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
+            conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+            conn.sudo("firewall-cmd --reload", hide=True)
+            
+            # 5. Final service kick to ensure the deadlock we found earlier is cleared
+            conn.sudo("systemctl restart glancesweb", warn=True, hide=True)
+            
+            conn.close()
+            self.finished.emit(self.name, True)
+            
+        except Exception as e:
+            print(f"Repair Error on {self.name}: {e}")
+            self.finished.emit(self.name, False)
+
 class GlancesWorker(QThread):
     stats_updated = pyqtSignal(str, float, float)
-    needs_repair = pyqtSignal(str) # Signal to UI that we need a firewall fix
+    needs_repair = pyqtSignal(str)
 
     def __init__(self, name, entry):
         super().__init__()
@@ -4548,27 +4660,55 @@ class GlancesWorker(QThread):
         self.fail_count = 0
         self.is_repairing = False
 
+    def check_ip_reachable(self):
+        """Quickly check if the IP is even alive on the network."""
+        try:
+            # Try to open a socket to the port quickly
+            socket.setdefaulttimeout(2)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((self.ip, 61208))
+            s.close()
+            return True
+        except:
+            return False
+
     def run(self):
         while True:
             if not self.is_repairing:
                 try:
-                    r = requests.get(f"http://{self.ip}:61208/api/3/all", timeout=2)
-                    if r.status_code == 200:
-                        data = r.json()
-                        self.stats_updated.emit(self.name, data['cpu']['total'], data['mem']['percent'])
-                        self.fail_count = 0
-                    else:
-                        raise Exception("Bad Status")
-                except:
-                    self.fail_count += 1
-                    self.stats_updated.emit(self.name, 0.0, 0.0)
+                    # 1. Fetch CPU
+#                    r = requests.get(f"http://{self.ip}:61208/api/3/all", timeout=5)
+                    r_cpu = requests.get(f"http://{self.ip}:61208/api/3/cpu", timeout=10)
+                    # 2. Fetch MEM
+                    r_mem = requests.get(f"http://{self.ip}:61208/api/3/mem", timeout=10)
                     
-                    # If failed 3 times, request a repair
+                    if r_cpu.status_code == 200 and r_mem.status_code == 200:
+                        cpu_data = r_cpu.json()
+                        mem_data = r_mem.json()
+                        
+                        # Note: Individual plugin endpoints return the dict directly
+                        # Not wrapped in another key
+                        cpu_val = cpu_data.get('total', 0.0)
+                        mem_val = mem_data.get('percent', 0.0)
+                        
+                        self.stats_updated.emit(self.name, cpu_val, mem_val)
+                        self.fail_count = 0 
+                    else:
+                        # If the service is there but the API path is wrong
+                        print(f"[{self.name}] API Path Error: Check Glances Version")
+                
+                except requests.exceptions.Timeout:
+                    # This should be MUCH rarer now that we aren't using /all
+                    print(f"[{self.name}] Stats update timed out.")
+                    self.stats_updated.emit(self.name, 0.0, 0.0)
+                except requests.exceptions.ConnectionError:
+                    self.fail_count += 1
                     if self.fail_count >= 3:
                         self.is_repairing = True
                         self.needs_repair.emit(self.name)
             
             self.sleep(5)
+
 
 # --- 3. UI Components (Same as before) ---
 
@@ -4607,7 +4747,10 @@ class ServerTile(QWidget):
         # CPU Bar
         self.cpu_bar = QProgressBar()
         self.cpu_bar.setFixedHeight(14)
-        self.cpu_bar.setFormat("  CPU")
+#        self.cpu_bar.setRange(0, 100)
+#        self.cpu_bar.setFormat("  CPU")
+        self.cpu_bar.setFormat("")
+#        self.cpu_bar.setFormat(" CPU %p%")
         self.cpu_bar.setTextVisible(True)
         self.cpu_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self.cpu_bar)
@@ -4615,13 +4758,77 @@ class ServerTile(QWidget):
         # Memory Bar - Curved bottom corners
         self.mem_bar = QProgressBar()
         self.mem_bar.setFixedHeight(14)
-        self.mem_bar.setFormat("  MEM")
+#        self.mem_bar.setRange(0, 100)
+#        self.mem_bar.setFormat("  MEM")
+        self.mem_bar.setFormat("")
+#        self.mem_bar.setFormat(" MEM %p%")
         self.mem_bar.setTextVisible(True)
         self.mem_bar.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self.mem_bar)
+        
+        '''
+        self.cpu_bar_style = """
+            QProgressBar {
+                border: 1px solid #444;
+                border-radius: 4px;
+                background-color: #222;
+                text-align: left; /* Keep text to the left */
+                color: white;
+                font-weight: bold;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db; /* Blue for CPU */
+                width: 1px;
+            }
+        """
+        self.cpu_bar.setStyleSheet(self.cpu_bar_style)
+
+        self.mem_bar_style = """
+            QProgressBar {
+                border: 1px solid #444;
+                border-radius: 4px;
+                background-color: #222;
+                text-align: left; /* Keep text to the left */
+                color: white;
+                font-weight: bold;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background-color: #9b59b6; /* Blue for MEM */
+                width: 1px;
+            }
+        """
+        self.mem_bar.setStyleSheet(self.mem_bar_style)
+        '''
+
+        # Use a similar one for MEM with a different chunk color (e.g., #9b59b6)
 
         # Main Tile Container
         self.setStyleSheet("background-color: #1c2833; border-radius: 6px; border: 1px solid #34495e;")
+
+    def set_repairing(self, state):
+        if state:
+#            self.stats_label.setText("NETWORK ERROR: Repairing...")
+            self.stats_label.setText("CONN LOST: Re-verifying IP...")
+            self.stats_label.setStyleSheet("background-color: #e67e22; color: white; font-size: 9px;")
+        else:
+            # This will be called when repair finishes
+            self.update_ui(0, 0)
+
+    def set_repairing2(self, state):
+        if state:
+            live_label_bg = "background-color: #2c3e50; color: #FFFFFF; font-weight: bold;"
+            self.stats_label.setStyleSheet(f"{live_label_bg} font-size: 9px; font-weight: 500;")
+#            self.stats_label.setText(f"IP CHANGED? Repairing...")
+            self.stats_label.setText("CONN LOST: Re-verifying IP...")
+            cpu_color = "#a3cb38"
+            mem_color = "#a3cb38"
+            base_bar_style = "QProgressBar { background-color: #2c3e50; border: none; color: white; font-size: 8px; font-weight: bold; border-radius: 0px; } "    
+            self.cpu_bar.setStyleSheet(base_bar_style + f"QProgressBar::chunk {{ background-color: {cpu_color}; }}")
+            self.mem_bar.setStyleSheet(base_bar_style + f"QProgressBar::chunk {{ background-color: {mem_color}; border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }}")
+        else:
+            self.update_ui(0, 0)
 
     def update_ui(self, cpu, mem):
         # 1. THE FIX: Re-apply 'Live' styles to labels to clear blackout
@@ -4647,7 +4854,7 @@ class ServerTile(QWidget):
             mem_color = "#ffa500" # Orange
         else:
             cpu_color = "#2ecc71" # Green
-            mem_color = "#2ecc71" # Green
+            mem_color = "#2980b9" # Blue
 
         # Ensure bars don't keep blackout borders
         base_bar_style = "QProgressBar { background-color: #2c3e50; border: none; color: white; font-size: 8px; font-weight: bold; border-radius: 0px; } "
@@ -4656,6 +4863,16 @@ class ServerTile(QWidget):
         self.mem_bar.setStyleSheet(base_bar_style + f"QProgressBar::chunk {{ background-color: {mem_color}; border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }}")
 
     def set_blackout_state(self):
+        """Used when the service is unreachable but we aren't sure why yet."""
+        self.stats_label.setText("GLANCES DOWN")
+        black_bg = "background-color: #000000; color: #7f8c8d; border: 1px solid #222;"
+        self.name_label.setStyleSheet(f"font-size: 11px; {black_bg}")
+        self.stats_label.setStyleSheet(f"font-size: 9px; {black_bg}")
+        
+        self.cpu_bar.setValue(0)
+        self.mem_bar.setValue(0)
+
+    def set_blackout_state2(self):
         # 1. Force Stats to 0%
         self.stats_label.setText("CPU: 0%  MEM: 0%")
         
