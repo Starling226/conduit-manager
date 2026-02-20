@@ -31,10 +31,10 @@ The `ConduitQt.py` application is a robust, multi-threaded, cross-platform manag
 
 * **Dynamic Server Management**: Easily manage your infrastructure via the `servers.txt` configuration file. Add, edit, or remove servers, and the GUI reflects changes instantly.
 * **Batch Operations**: The interface uses a "Targeting" system. Simply move servers to the **Right List (Target List)** to include them in an action.
-    > **Note:** Every server in the Right List will be included in the requested operation (Deploy, Start, Stop, or Reset), regardless of whether it is currently highlighted.
+    > **Note:** Every server in the Right List will be included in the requested operation (Deploy, Start, Stop, or Reset), regardless of whether it is currently highlighted. You can also select servers from Status Table and do similar operations but the the right panel must be empty.
 * **Real-time Monitoring**: The multi-threaded architecture ensures the UI remains responsive while performing heavy deployment tasks or fetching live statistics from multiple nodes simultaneously.
-* **Graphic Interface for Network Traffic Monitoring**: The graphic interface allows monitoring of servers inividually using the high peformance PyQtgraph library.
-* **Configuration Updates**: By enabling the **"Apply Config Changes"** checkbox, you can push new parameters (such as client limits or bandwidth caps) to your servers during a *Start* or *Restart* command.
+* **Graphic Interface for Network Traffic Monitoring* and System Health*: The graphic interface allows monitoring of servers inividually using the high peformance PyQtgraph library.
+* **Configuration Updates**: By enabling the **"Update Config"** checkbox, you can push new parameters (such as client limits or bandwidth caps) to your servers during a *Start* or *Restart* command.
 
 
 
@@ -57,10 +57,6 @@ The `ConduitQt.py` application is a robust, multi-threaded, cross-platform manag
 | **ConduitQt.py** | Cross-Platform | Full-featured visual management & bulk deployment. |
 
 ---
-
-### ⚠️ Important Security Note
-During a **Fresh Deployment**, if a root password is provided in `servers.txt`, the application will use it to install your SSH public key (`id_conduit.pub`). Once the deployment is successful and the key is verified, the application will automatically strip the root password from your `servers.txt` file for security.
-
 
 ### Screenshot of the Conduit Manager Qt Application
 
@@ -129,7 +125,7 @@ After installation, the Psiphon network requires time for vetting and propagatio
 * **Report:** Report allows you to download and display conduit hourly network traffic across the individual servers. When you click on Traffic, it imports the server hourly log files from local disk. Within the Visualizer window you can click on "Reload to retrieve the data" and it starts fetching the latest hourly logs from the servers. Please be patient, it may takes a couple of minutes to download the logs.
 * **Health:** Health display the current server health incluidng CPU and Memory usage for all the servers in real time in a new window. Depending on display mode it can display server name or IP address. You can change the display mode by clicking on Health Button, it quickly changes the display mode without launching a fresh window.
 * **Secondary:** If your bandwidth is not effectively used you can check this and deploy a new conduit instance. When checked every operation will be done on the seconday instance. This includes Traffic and Report Visualization. If a server does not have the second instance, it will be displayed in red color in Status Table and so, it will not be included in Traffic and Report graphs. You can switch between checked and unchecked to see the state of each group of instances. **Please note when deploying a server for the first time leave it as unchecked.**
-
+* **Sun & Lion:** If you like to restrict your conduit connection only from Shir O Khorshid Android app, enable this before deployment. Clients who use Psiphon Android app will be ignored. 
 ## Important Notes
 * **SSH Port:** These scripts use the standard **SSH Port 22** for all connections y default, unless you choose a different port.
 * **Security Warning:** The `servers.txt` or `servers.json` files contains plain-text passwords. **DO NOT** upload this file to GitHub.
