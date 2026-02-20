@@ -112,7 +112,7 @@ class ReportFetcher(QRunnable):
 
                     kwargs.setdefault('hide', False)
                     kwargs.setdefault('warn', False)
-                    kwargs.setdefault('timeout', 15)
+                    kwargs.setdefault('timeout', 30)
 
                     if is_root:
                         return conn.run(cmd, **kwargs)
@@ -198,7 +198,7 @@ class LogFetcher(QRunnable):
 
                     kwargs.setdefault('hide', False)
                     kwargs.setdefault('warn', False)
-                    kwargs.setdefault('timeout', 20)
+                    kwargs.setdefault('timeout', 30)
 
                     if is_root:
                         return conn.run(cmd, **kwargs)
@@ -452,7 +452,7 @@ class AutoStatsWorker(QThread):
 
                     kwargs.setdefault('hide', False)
                     kwargs.setdefault('warn', False)
-                    kwargs.setdefault('timeout', 10)
+                    kwargs.setdefault('timeout', 20)
 
                     if is_root:
                         return conn.run(cmd, **kwargs)
@@ -469,7 +469,7 @@ class AutoStatsWorker(QThread):
 
                 # 2. If running, get the logs for the requested window
                 cmd = f"journalctl -u conduit{AppState.conduit_id}.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
-                result = run_cmd(cmd, hide=True, timeout=15)
+                result = run_cmd(cmd, hide=True, timeout=30)
                 output = result.stdout.strip()
 
                 if output:
@@ -1191,9 +1191,9 @@ WantedBy=multi-user.target
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py"
+                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
 
 #                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit{conduit_id}/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
@@ -1366,8 +1366,7 @@ WantedBy=multi-user.target"""
                 res = run_cmd("id -u", hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
-                
-                
+                                
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
                 v_check = run_cmd(f"/opt/conduit{AppState.conduit_id}/conduit --version", hide=True, warn=True)
@@ -1430,7 +1429,7 @@ WantedBy=multi-user.target"""
 
                 # 5. Start
                 run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)      
-                
+                                
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
@@ -1448,12 +1447,12 @@ WantedBy=multi-user.target"""
                     print(f"Skipping backup: {filename} does not exist.")
                 
 
-                '''
-                # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = "5 * * * * /usr/bin/python3 /opt/conduit/get_conduit_stat.py >> /opt/conduit/cron_sys.log 2>&1"
+                # Setup Cronjob (Idempotent: prevents duplicate entries)
+                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                conn.run(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
-                '''
+                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
+
+                run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
 
                 return f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}."
         except Exception as e:
@@ -4497,47 +4496,6 @@ class VisualizerReportWindow(QMainWindow):
         except Exception as e:
             print(f"Error parsing {file_path}: {e}")
             return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
-
-
-# --- 1. Targeted Firewall Repair Worker ---
-class RepairWorker2(QThread):
-    finished = pyqtSignal(str, bool)
-
-    def __init__(self, name, entry):
-        super().__init__()
-        self.name = name
-        self.entry = entry
-
-    def run(self):
-        try:
-            local_ip = requests.get("https://api.ipify.org", timeout=5).text
-            ip, user = self.entry['ip'], self.entry['user']
-            port = self.entry.get('port', 22)
-            home = os.path.expanduser("~")
-            key_path = os.path.join(home, ".ssh", "id_conduit")
-
-            conn = Connection(host=ip, user=user, port=port,
-                              connect_kwargs={"key_filename": key_path, "timeout": 7})
-            
-            # Clean old rules for port 61208 and add the new one
-            # Note: We use 'sudo' here assuming root or sudoer access
-            rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
-            for line in rules.splitlines():
-                if 'port="61208"' in line:
-                    conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
-            
-            new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
-            conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
-            conn.sudo("firewall-cmd --reload", hide=True)
-            conn.sudo("systemctl restart glancesweb", warn=True, hide=True)
-            
-            conn.close()
-            self.finished.emit(self.name, True)
-        except Exception:
-            self.finished.emit(self.name, False)
-
-# --- 2. Live Monitoring Worker (Smart Detection) ---
-
 
 class RepairWorker(QThread):
     finished = pyqtSignal(str, bool)
