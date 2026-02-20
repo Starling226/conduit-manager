@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+import argparse
 from datetime import datetime
 
 # Prevent crash on large integer to string conversion
@@ -30,21 +31,20 @@ def parse_record(line):
     if match:
         if "Connecting" in line:
             return match.groups()
-
         return (f"{match.group(1)} {match.group(2)}", match.group(3), match.group(4), match.group(5))
     return None
   
-def get_status():
-    base_dir = "/opt/conduit"
-    filename = os.path.join(base_dir, f"{datetime.now().year}-conduit.log")
+def get_status(work_dir, service):
+    filename = os.path.join(work_dir, f"{datetime.now().year}-conduit.log")
     since = "'120 minutes ago'" if os.path.exists(filename) else f"'{datetime.now().year}-01-01 00:00:00'"
 
-    cmd = (f"journalctl -u conduit.service --since {since} --no-pager -o short-iso")
+    cmd = f"journalctl -u {service} --since {since} --no-pager -o short-iso"
 
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
         lines = result.stdout.strip().splitlines()
-    except:
+    except Exception as e:
+        print(f"❌ Error reading journalctl for {service}: {e}")
         return []
 
     raw_points = []
@@ -82,7 +82,6 @@ def get_status():
         baseline = next((p for p in reversed(adj_points) if p['dt'] < h), grp[0])
         up, dw = grp[-1]['u'] - baseline['u'], grp[-1]['d'] - baseline['d']
         
-        # Limit check (2TB)
         if up > 2*1024**4 or dw > 2*1024**4: continue
 
         hourly_results.append({
@@ -92,21 +91,45 @@ def get_status():
         })
     return hourly_results
 
-def get_stat():
-    results = get_status()
-    if not results: return
-    base_dir = "/opt/conduit"
-    os.makedirs(base_dir, exist_ok=True)
-    filename = os.path.join(base_dir, f"{datetime.now().year}-conduit.log")
+def get_stat(work_dir, service):
+    # --- PRE-FLIGHT PERMISSION CHECK ---
+    if not os.path.exists(work_dir):
+        try:
+            os.makedirs(work_dir, exist_ok=True)
+            print(f"📁 Created working directory: {work_dir}")
+        except Exception as e:
+            print(f"❌ CRITICAL: Could not create directory {work_dir}. Error: {e}")
+            return
+
+    if not os.access(work_dir, os.W_OK):
+        print(f"❌ CRITICAL: Directory {work_dir} is NOT writable. Check permissions.")
+        return
+
+    results = get_status(work_dir, service)
+    if not results: 
+        print(f"⚠️ No new data found for {service} in the last 120 minutes.")
+        return
+    
+    filename = os.path.join(work_dir, f"{datetime.now().year}-conduit.log")
+    
     existing = set()
     if os.path.exists(filename):
         with open(filename, "r") as r:
             for line in r: existing.add(line.split(',')[0].strip())
-    with open(filename, "a") as f:
-        for res in results:
-            if res['time'] not in existing:
-                f.write(f"{res['time']}, {res['clients']}, {res['up']}, {res['down']}\n")
-                print(f"✅ Logged {res['time']}")
+            
+    try:
+        with open(filename, "a") as f:
+            for res in results:
+                if res['time'] not in existing:
+                    f.write(f"{res['time']}, {res['clients']}, {res['up']}, {res['down']}\n")
+                    print(f"✅ Logged {res['time']}")
+    except Exception as e:
+        print(f"❌ Error writing to log file: {e}")
 
 if __name__ == "__main__":
-    get_stat()
+    parser = argparse.ArgumentParser(description="Conduit Stat Logger")
+    parser.add_argument("--work_dir", default="/opt/conduit", help="Base directory for logs")
+    parser.add_argument("--service", default="conduit.service", help="Systemd service name")
+    
+    args = parser.parse_args()
+    get_stat(args.work_dir, args.service)
