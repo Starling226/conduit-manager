@@ -54,7 +54,7 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 class AppState:
     use_lion_sun = False
