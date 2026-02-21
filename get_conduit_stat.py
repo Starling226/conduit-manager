@@ -23,6 +23,31 @@ def parse_to_bytes(size_str):
         return 0
 
 def parse_record(line):
+    parts = line.strip().split(',')
+    if len(parts) < 4:
+        return None
+
+    dt_raw = parts[0]
+    numbers = []
+
+    # Loop through the data parts (clients, up, down)
+    for p in parts[1:]:
+        # Only process if it looks like "key=value"
+        if '=' in p:
+            val_str = p.split('=')[1]
+            if val_str.isdigit():
+                numbers.append(int(val_str))
+
+    # Only return if we successfully found exactly 3 numbers
+    if len(numbers) == 3:
+        clients = numbers[0]
+        up = numbers[1]
+        down = numbers[2]
+        return [dt_raw, clients, up, down]
+
+    return None
+
+def parse_record2(line):
     if "Connecting" in line:
         pattern = r"(\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2}).*?Connected:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
     else:
@@ -38,7 +63,17 @@ def get_status(work_dir, service):
     filename = os.path.join(work_dir, f"{datetime.now().year}-conduit.log")
     since = "'120 minutes ago'" if os.path.exists(filename) else f"'{datetime.now().year}-01-01 00:00:00'"
 
-    cmd = f"journalctl -u {service} --since {since} --no-pager -o short-iso"
+#    cmd = f"journalctl -u {service} --since {since} --no-pager -o short-iso"
+
+    cmd = (
+        f"journalctl -u {service} "
+        f"--since {since} --no-pager -o short-iso | "
+        f"awk -F' CONDUIT_JSON: ' '{{ "
+        f"split($1, a, \" \"); "
+        f"split($2, b, \",\"); "
+        f"print a[1] \",\" b[1] \",\" b[2] \",\" b[3] "
+        f"}}'"
+    )   
 
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
@@ -48,13 +83,20 @@ def get_status(work_dir, service):
         return []
 
     raw_points = []
+
     for line in lines:
-        if (res := parse_record(line)) is not None:
+        # 1. Regex to extract: Date, Clients, UP, DOWN
+        if (res := self.parse_record(line)) is not None:
+            dt_raw, clients, up_bytes, down_bytes = res
+                
+            # 2. Format data
+            dt_obj = datetime.fromisoformat(dt_raw)
+            dt = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
             raw_points.append({
-                'dt': datetime.strptime(res[0].replace('T', ' '), "%Y-%m-%d %H:%M:%S"),
-                'c': int(res[1]),
-                'u': parse_to_bytes(res[2]),
-                'd': parse_to_bytes(res[3])
+                'dt': dt,
+                'c': clients,
+                'u': up_bytes,
+                'd': down_bytes
             })
 
     if len(raw_points) < 2: return []
@@ -129,7 +171,7 @@ def get_stat(work_dir, service):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Conduit Stat Logger")
     parser.add_argument("--work_dir", default="/opt/conduit", help="Base directory for logs")
-    parser.add_argument("--service", default="conduit.service", help="Systemd service name")
+    parser.add_argument("--service", default="conduit-monitor.service", help="Systemd service name")
     
     args = parser.parse_args()
     get_stat(args.work_dir, args.service)
