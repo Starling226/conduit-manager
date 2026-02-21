@@ -23,7 +23,7 @@ echo "Starting monitor on $STATS_FILE with tag $FINAL_TAG..."
 while true; do
   if [ -f "$STATS_FILE" ]; then
     # Read the file, remove newlines to keep it on one log line, and log it
-    DATA=$(cat "$STATS_FILE" | tr -d '\n')
+    DATA=$(jq -r '"clients=\(.connectedClients),up=\(.totalBytesUp),down=\(.totalBytesDown)"' "$STATS_FILE")
     echo "CONDUIT_JSON: $DATA"
   fi
   sleep 10
