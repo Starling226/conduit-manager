@@ -47,23 +47,9 @@ def parse_record(line):
 
     return None
 
-def parse_record2(line):
-    if "Connecting" in line:
-        pattern = r"(\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2}).*?Connected:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
-    else:
-        pattern = r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}).*?Clients:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
-    match = re.search(pattern, line)
-    if match:
-        if "Connecting" in line:
-            return match.groups()
-        return (f"{match.group(1)} {match.group(2)}", match.group(3), match.group(4), match.group(5))
-    return None
-  
 def get_status(work_dir, service):
     filename = os.path.join(work_dir, f"{datetime.now().year}-conduit.log")
     since = "'120 minutes ago'" if os.path.exists(filename) else f"'{datetime.now().year}-01-01 00:00:00'"
-
-#    cmd = f"journalctl -u {service} --since {since} --no-pager -o short-iso"
 
     cmd = (
         f"journalctl -u {service} "
@@ -74,7 +60,7 @@ def get_status(work_dir, service):
         f"print a[1] \",\" b[1] \",\" b[2] \",\" b[3] "
         f"}}'"
     )   
-
+    
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
         lines = result.stdout.strip().splitlines()
@@ -85,19 +71,24 @@ def get_status(work_dir, service):
     raw_points = []
 
     for line in lines:
+
         # 1. Regex to extract: Date, Clients, UP, DOWN
-        if (res := self.parse_record(line)) is not None:
+        if (res := parse_record(line)) is not None:
             dt_raw, clients, up_bytes, down_bytes = res
                 
             # 2. Format data
-            dt_obj = datetime.fromisoformat(dt_raw)
-            dt = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
-            raw_points.append({
-                'dt': dt,
-                'c': clients,
-                'u': up_bytes,
-                'd': down_bytes
-            })
+            try:
+                dt_obj = datetime.strptime(dt_raw, "%Y-%m-%dT%H:%M:%S%z")  # compatible with python 3.9
+#                dt_obj = datetime.fromisoformat(dt_raw) # has isseus with python older than 3.11
+                raw_points.append({
+                    'dt': dt_obj,
+                    'c': clients,
+                    'u': up_bytes,
+                    'd': down_bytes
+                })
+            except ValueError as ve:
+                print(f"⚠️ Skipping line due to date error: {dt_raw}")
+                continue
 
     if len(raw_points) < 2: return []
 
@@ -111,7 +102,12 @@ def get_status(work_dir, service):
                            'u': raw_points[i]['u'] + off_u, 'd': raw_points[i]['d'] + off_d})
 
     hourly_results = []
-    now_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
+
+    log_tz = raw_points[0]['dt'].tzinfo
+    now_hour = datetime.now(log_tz).replace(minute=0, second=0, microsecond=0)
+    
+
+#    now_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
     groups = {}
     for p in adj_points:
         h = p['dt'].replace(minute=0, second=0, microsecond=0)
@@ -165,6 +161,7 @@ def get_stat(work_dir, service):
                 if res['time'] not in existing:
                     f.write(f"{res['time']}, {res['clients']}, {res['up']}, {res['down']}\n")
                     print(f"✅ Logged {res['time']}")
+
     except Exception as e:
         print(f"❌ Error writing to log file: {e}")
 
