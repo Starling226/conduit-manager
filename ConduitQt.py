@@ -1072,6 +1072,7 @@ class DeployWorker(QThread):
                     cmd_parts.append("--compartment shirokhorshid")
 
             exec_cmd = " ".join(cmd_parts)
+            messages = []
 
             with Connection(host=s['ip'], 
                             user=user,
@@ -1097,7 +1098,7 @@ class DeployWorker(QThread):
                 res = run_cmd("id -u",hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
-
+                
                 # 1. Key Injection
                 if not AppState.use_sec_inst:
                     run_cmd("mkdir -p ~/.ssh && chmod 700 ~/.ssh",hide=True)
@@ -1109,9 +1110,11 @@ class DeployWorker(QThread):
 
                     if "rhel" in os_id or "rocky" in os_id or "almalinux" in os_id or "centos" in os_id or "fedora" in os_id:
                         print("Detected RHEL-based system.")
+                        messages.append("Detected RHEL-based system.")
                         rh_distro = True
                     elif "debian" in os_id or "ubuntu" in os_id:
                         print("Detected Debian-based system.")
+                        messages.append("Detected Debian-based system.")
                         rh_distro = False
 
                 # 2. Cleanup & Directory Prep                
@@ -1132,11 +1135,11 @@ class DeployWorker(QThread):
 #                    if run_cmd("command -v dnf", warn=True, hide=True).ok:
                     if rh_distro:
                         run_cmd("dnf install epel-release -y", hide=True)
-                        run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs glances python3-bottle -y", hide=True)
+                        run_cmd("dnf install sed wget policycoreutils firewalld curl tcpdump bind-utils net-tools vim htop nload iftop nethogs glances python3-bottle jq -y", hide=True)
                     else:
 #                        conn.run("apt-get update -y", hide=True)
                         run_cmd("apt-get update -y", hide=True)
-                        run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs glances python3-bottle -y", hide=True)
+                        run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs glances python3-bottle jq -y", hide=True)
 
                 
                 # 3. Download Binary
@@ -1197,9 +1200,59 @@ WantedBy=multi-user.target
 
 #                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit{conduit_id}/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
+                
+                #8. setting up the Systemd service for conduit-monitor
 
-                #8. setting up the Systemd service for glances
+                if AppState.conduit_id:
+                    exec_cmd = f"/opt/conduit{AppState.conduit_id}/conduit-monitor.sh --stats-file /var/lib/conduit{AppState.conduit_id}/stats.json --id {AppState.conduit_id}"
+                else:
+                    exec_cmd = f"/opt/conduit{AppState.conduit_id}/conduit-monitor.sh --stats-file /var/lib/conduit{AppState.conduit_id}/stats.json"
             
+                # setting up the Systemd service for conduit-monitor.sh            
+                           
+                conduit_monitor_service_config = f"""[Unit]
+Description=Conduit Metric Logger (10s)
+After=network.target
+# Ensure this only runs if Conduit is actually running
+Requires=conduit.service
+After=conduit.service
+
+[Service]
+ExecStart={exec_cmd}
+Restart=always
+RestartSec=5
+# Run as a specific user if needed, or root
+User=root
+
+[Install]
+WantedBy=multi-user.target"""
+
+                run_cmd(f"echo '{conduit_monitor_service_config}' | sudo tee /etc/systemd/system/conduit-monitor{AppState.conduit_id}.service > /dev/null")
+                
+                # 5. Download conduit-monitor.sh Script from GitHub
+                # We use the 'raw' GitHub URL to get the actual code, not the HTML page
+                stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/conduit-monitor.sh"
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit-monitor.sh {stats_script_url}", hide=True)
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit-monitor.sh")
+
+                # 5. Reload, Enable, and Start
+                run_cmd("systemctl daemon-reload", hide=True)
+                run_cmd(f"systemctl enable --now conduit-monitor{AppState.conduit_id}", hide=True)
+                run_cmd(f"systemctl start conduit-monitor{AppState.conduit_id}", hide=True)
+                time.sleep(2)
+                
+                status_res = run_cmd(f"systemctl is-active conduit-monitor{AppState.conduit_id}", hide=True, warn=True)
+                current_status = status_res.stdout.strip() if status_res.ok else "inactive"
+
+                if current_status == "inactive":
+                    current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
+                    print(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
+                    messages.append(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
+                else:
+                    current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
+
+                
+                #9. setting up the Systemd service for glances            
                 service_config = """[Unit]
 Description=Glances Web Server
 After=network.target
@@ -1211,7 +1264,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target"""
             
-                # 9. Write service file and start
+                # 10. Write service file and start
                 run_cmd(f"echo '{service_config}' | sudo tee /etc/systemd/system/glancesweb.service", hide=True)
                 run_cmd("systemctl daemon-reload", hide=True)
                 run_cmd("systemctl enable --now glancesweb.service", hide=True)
@@ -1221,7 +1274,7 @@ WantedBy=multi-user.target"""
                 run_cmd(cmd, hide=True)
                 run_cmd("firewall-cmd --reload", hide=True)
 
-                # 9. customizing thhe ssh port number
+                # 11. customizing thhe ssh port number
                 if not AppState.use_sec_inst:
                     config_path = "/etc/ssh/sshd_config"
                     cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
@@ -1230,9 +1283,13 @@ WantedBy=multi-user.target"""
 
                     if str(port_num) == str(current_port):
                         print(f"Port is already {port_num}. No changes needed.")
-                        return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
+                        messages.append(f"Port is already {port_num}. No changes needed.")
+                        messages.append(f"[OK] {s['ip']} successfully deployed (Manual Service Config).")
+                        messages = " ".join(messages)
+                        return messages
 
                     print(f"Changing SSH port from {current_port} to {port_num}...")
+                    messages.append(f"Changing SSH port from {current_port} to {port_num}...")
                     
                     # 1. Start the service
                     run_cmd("systemctl start firewalld", hide=True)
@@ -1244,6 +1301,7 @@ WantedBy=multi-user.target"""
                     is_running = False
 
                     print("Waiting for firewalld to start...")
+
 
                     while attempts < max_attempts:
                         # Check status
@@ -1306,8 +1364,11 @@ WantedBy=multi-user.target"""
                     
 #                if pwd:
 #                    self.remove_password_signal.emit(s['ip'])
+                
+                messages.append(f"[OK] {s['ip']} successfully deployed (Manual Service Config).")
+                messages = " ".join(messages)
+                return messages
 
-                return f"[OK] {s['ip']} successfully deployed (Manual Service Config)."
         except Exception as e:
             return f"[ERROR] {s['ip']} failed: {str(e)}"
 
@@ -1320,6 +1381,7 @@ WantedBy=multi-user.target"""
             user = s['user'].strip()
             password = s['password'].strip()
             is_root = (user == "root")
+            messages = []
 
             if is_root:
                 # Key-based: Explicitly tell Fabric which files to use
@@ -1366,7 +1428,7 @@ WantedBy=multi-user.target"""
                 res = run_cmd("id -u", hide=True, warn=True)
                 if not res.ok:
                     return f"[SKIP] {s['ip']}: Could not connect or not root."
-                                            
+                                                         
                 # --- NEW: VERSION CHECK LOGIC ---
                 self.log_signal.emit(f"[{s['ip']}] Checking current version...")
                 v_check = run_cmd(f"/opt/conduit{AppState.conduit_id}/conduit --version", hide=True, warn=True)
@@ -1418,22 +1480,15 @@ WantedBy=multi-user.target"""
                     run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/psiphon_config.json {PSIPHON_CONFIG_URL}", hide=True)
 #                cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --psiphon-config /opt/conduit/psiphon_config.json --geo --stats-file stats.json --data-dir /var/lib/conduit"
                 run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={exec_cmd}|' /etc/systemd/system/conduit{AppState.conduit_id}.service")
-                run_cmd("systemctl daemon-reload")                    
-
-#                if conduit_release != 'pre_release':
-#                    if self.params['update']:
-#                        cmd = f"/opt/conduit/conduit start --max-clients {self.params['clients']} --bandwidth {self.params['bw']} --data-dir /var/lib/conduit"
-                    
-#                    run_cmd(f"sed -i 's|^ExecStart=.*|ExecStart={cmd}|' /etc/systemd/system/conduit.service")
-#                    run_cmd("systemctl daemon-reload")
+                run_cmd("systemctl daemon-reload")
 
                 # 5. Start
                 run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)                
-                                
+                                                
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
-    
+                    
                 current_year = datetime.now().year
                 filename = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log"
                 backup_log = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log.bak"
@@ -1445,15 +1500,41 @@ WantedBy=multi-user.target"""
                     run_cmd(f'mv {filename} {backup_log}', hide=True)
                 else:
                     print(f"Skipping backup: {filename} does not exist.")
-                
-
+                                
                 # Setup Cronjob (Idempotent: prevents duplicate entries)
                 cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
 
-                return f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}."
+                # Download conduit-monitor.sh Script from GitHub
+
+                run_cmd(f"systemctl stop conduit-monitor{AppState.conduit_id}", warn=True, hide=True)
+                time.sleep(2)
+                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit-monitor.sh", warn=True, hide=True)
+
+                stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/conduit-monitor.sh"
+                run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit-monitor.sh {stats_script_url}", hide=True)
+                run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit-monitor.sh")
+
+                # Reload and Start
+                run_cmd(f"systemctl start conduit-monitor{AppState.conduit_id}", hide=True)
+                time.sleep(2)
+                
+                status_res = run_cmd(f"systemctl is-active conduit-monitor{AppState.conduit_id}", hide=True, warn=True)
+                current_status = status_res.stdout.strip() if status_res.ok else "inactive"
+
+                if current_status == "inactive":
+                    current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
+                    print(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
+                    messages.append(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
+                else:
+                    current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
+
+                messages.append(f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}.")
+                messages = " ".join(messages)
+                return messages
+
         except Exception as e:
             return f"[ERROR] {s['ip']} failed: {str(e)}"
 
