@@ -162,10 +162,15 @@ class LogFetcher(QRunnable):
             # 1. Fetch only relevant lines from journal
 
             cmd = (
-                f"journalctl -u conduit{AppState.conduit_id}.service --since '{self.days} days ago' --no-pager -o short-iso | "
+                f"journalctl -u conduit-monitor{AppState.conduit_id}.service "
+                f"--since '{self.days} days ago' --no-pager -o short-iso | "
+                f"awk -F' CONDUIT_JSON: ' '{{ "
+                f"split($1, a, \" \"); "
+                f"split($2, b, \",\"); "
+                f"print a[1] \",\" b[1] \",\" b[2] \",\" b[3] "
+                f"}}' | "
                 f"gzip -c"
             )
-
 
             text_buffer = io.StringIO()
 
@@ -468,23 +473,31 @@ class AutoStatsWorker(QThread):
                     return res
 
                 # 2. If running, get the logs for the requested window
-                cmd = f"journalctl -u conduit{AppState.conduit_id}.service --since '{self.time_window}' -o cat | grep -F '[STATS]'"
+
+                cmd = (
+                    f"journalctl -u conduit-monitor{AppState.conduit_id}.service "
+                    f"--since \"{self.time_window}\" --no-pager -o short-iso | "
+                    f"awk -F' CONDUIT_JSON: ' '{{ "
+                    f"split($2, b, \",\"); "
+                    f"print b[1] \",\" b[2] \",\" b[3] "
+                    f"}}'"
+                )
+
                 result = run_cmd(cmd, hide=True, timeout=30)
                 output = result.stdout.strip()
 
                 if output:
                     lines = output.splitlines()
-                    # Using your regex pattern...
-                    pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)")
                     
                     data_points = []
                     for line in lines:
-                        m = pattern.search(line)
+                        m = re.search(r"clients=(\d+),up=(\d+),down=(\d+)", line)
+
                         if m:
                             data_points.append({
                                 'c': int(m.group(1)),
-                                'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
-                                'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}")
+                                'u': int(m.group(2)),
+                                'd': int(m.group(3))
                             })
                     if data_points:
                         data_points = self.fix_reboot_data_points(data_points)
@@ -707,6 +720,7 @@ class ServerWorker(QThread):
         except Exception as e:
             return f"[!] {s['server']} Error: {str(e)}"            
 
+
 class StatsWorker(QThread):
     finished_signal = pyqtSignal(str)
 
@@ -763,115 +777,109 @@ class StatsWorker(QThread):
 
     def get_stats(self, s):
         display_label = s['server'] if self.display_mode == 'server' else s['ip']
-        res = {"label": display_label, "success": False, "clients": "0", "up": "0B", 
-               "down": "0B", "uptime": "Offline", "mbps": "0.00", "mbps_val": 0.0,
-               "mbps_1h": "0.00","up_1h": "0B", "down_1h": "0B"}
+        # Initialize with numeric zeros
+        res = {
+            "label": display_label, "success": False, "clients": 0, 
+            "up": 0, "down": 0, "uptime": 0, 
+            "mbps": "0.00", "mbps_val": 0.0,
+            "mbps_1h": "0.00", "up_1h": 0, "down_1h": 0
+        }
         
         try:
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
-#            connect_kwargs = {"key_filename": [key_path], "look_for_keys": False, "allow_agent": False, "timeout": 10}
-
             port_num = int(s['port'])
             user = s['user'].strip()
             password = s['password'].strip()
             is_root = (user == "root")
 
             if is_root:
-                # Key-based: Explicitly tell Fabric which files to use
-                connect_kwargs = {
-                    "timeout": 10,
-                    "key_filename": [key_path],
-                    "look_for_keys": False,
-                    "allow_agent": False
-                }
+                connect_kwargs = {"timeout": 10, "key_filename": [key_path], "look_for_keys": False, "allow_agent": False}
                 cfg = Config()
-
             else:
-                # Password-based
                 connect_kwargs = {"password": password, "timeout": 15}
                 cfg = Config(overrides={'sudo': {'password': password}})
 
             with Connection(host=s['ip'], user=user, port=port_num, connect_kwargs=connect_kwargs, config=cfg) as conn:
-
                 def run_cmd(cmd, **kwargs):
+                    kwargs.setdefault('hide', True)
+                    kwargs.setdefault('warn', True)
+                    kwargs.setdefault('timeout', 15)
+                    return conn.run(cmd, **kwargs) if is_root else conn.sudo(cmd, **kwargs)
 
-                    kwargs.setdefault('hide', False)
-                    kwargs.setdefault('warn', False)
-                    kwargs.setdefault('timeout', 10)
-
-                    if is_root:
-                        return conn.run(cmd, **kwargs)
-                    else:    
-                        return conn.sudo(cmd, **kwargs)
-
-                # Command to get last 1 hour of raw stats
-#                cmd = "journalctl -u conduit.service --since '1 hour ago' -o cat | grep '\\[STATS\\]'"
-                cmd = f"journalctl -u conduit{AppState.conduit_id}.service --since '1 hour ago' -o cat | grep -F '[STATS]'"
-#                result = conn.run(cmd, hide=True, timeout=15)
-                result = run_cmd(cmd,hide=True, timeout=15)
+                cmd = (
+                    f"journalctl -u conduit-monitor{AppState.conduit_id}.service "
+                    f"--since '1 hour ago' --no-pager -o short-iso | "
+                    f"awk -F' CONDUIT_JSON: ' '{{ "
+                    f"split($2, b, \",\"); "
+                    f"print b[1] \",\" b[2] \",\" b[3] \",\" b[4] "
+                    f"}}'"
+                )
+                
+                result = run_cmd(cmd)
                 output = result.stdout.strip()
-
+                
                 if output:
                     lines = output.splitlines()
-                    # Pattern for: [STATS] Clients: 72 | Up: 236.8 MB | Down: 1.6 GB | Uptime: 37m54s
-                    pattern = re.compile(r"\[STATS\].*?(?:Clients|Connected):\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Uptime:\s*([\w\d]+)")
-#                    pattern = re.compile(r"Clients:\s*(\d+)\s*\|\s*Up:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Down:\s*([\d\.]+)\s*([TGMK]?B)\s*\|\s*Uptime:\s*([\w\d]+)")
-            
                     data_points = []
                     for line in lines:
-                        m = pattern.search(line)
+                        # Parsing into raw integers
+                        m = re.search(r"clients=(\d+),up=(\d+),down=(\d+),uptime=(\d+)", line)
                         if m:
                             data_points.append({
                                 'c': int(m.group(1)),
-                                'u': self.parse_to_bytes(f"{m.group(2)} {m.group(3)}"),
-                                'd': self.parse_to_bytes(f"{m.group(4)} {m.group(5)}"),
-                                'ut': m.group(6)
+                                'u': int(m.group(2)),
+                                'd': int(m.group(3)),
+                                'ut': int(m.group(4))
                             })
 
                     if data_points:
                         data_points = self.fix_reboot_data_points(data_points)
-
-                    if data_points:
                         res["success"] = True
                         first = data_points[0]
                         last = data_points[-1]
 
-                        # Calculate Averages
+                        # Store as numeric types
                         avg_clients = sum(d['c'] for d in data_points) / len(data_points)
-                        res["clients"] = str(int(round(avg_clients)))
-
-                        # Cumulative Totals (Last Record)
-                        res["up"] = self.format_bytes(last['u'])
-                        res["down"] = self.format_bytes(last['d'])
+                        res["clients"] = int(round(avg_clients))
+                        res["up"] = last['u']
+                        res["down"] = last['d']
                         res["uptime"] = last['ut']
+                        res["up_1h"] = max(0, last['u'] - first['u'])
+                        res["down_1h"] = max(0, last['d'] - first['d'])
 
-                        # Hourly Growth (Delta)
-                        res["up_1h"] = self.format_bytes(max(0, last['u'] - first['u']))
-                        res["down_1h"] = self.format_bytes(max(0, last['d'] - first['d']))
-
-                        
                         # Mbps logic
-                        total_sec = self.uptime_to_seconds(res["uptime"])
-                        if total_sec > 0:
-                            mbps = (last['d'] * 8) / total_sec / (1024*1024)
+                        if last['ut'] > 0:
+                            mbps = (last['d'] * 8) / last['ut'] / (1024*1024)
                             res["mbps_val"] = mbps
                             res["mbps"] = f"{mbps:.2f}"
 
-                        ut_1h_last = self.uptime_to_seconds(last['ut'])
-                        ut_1h_first = self.uptime_to_seconds(first['ut'])
-                        ut_1h = ut_1h_last - ut_1h_first
+                        ut_1h = last['ut'] - first['ut']
                         if ut_1h > 0:
                             mbps_1h = ((last['d'] - first['d']) * 8) / ut_1h / (1024*1024)
                             res["mbps_1h"] = f"{mbps_1h:.2f}"
-                        
                 else:
-                    res["uptime"] = "No Data (1h)"
+                    res["uptime_str"] = "No Data (1h)"
 
-        except Exception as e:
-            res["uptime"] = "Conn Error"
+        except Exception:
+            res["uptime_str"] = "Conn Error"
             
+#        print(res)            
         return res
+
+    def seconds_to_uptime(self,seconds):
+        """
+        Converts seconds into a string format: 210h44m53s
+        """
+        try:
+            seconds = int(seconds)
+            # Calculate hours, then get the remaining seconds to find minutes
+            hours, remainder = divmod(seconds, 3600)
+            minutes, secs = divmod(remainder, 60)
+        
+            return f"{hours}h{minutes}m{secs}s"
+        except (ValueError, TypeError):
+            return "0h0m0s"
 
     def uptime_to_seconds(self, uptime_str):
         try:
@@ -907,29 +915,38 @@ class StatsWorker(QThread):
         return f"{b:.2f} PB"
 
     def generate_table(self, results):
-        # 1. Main Table Generation
-        # width adjusted to 105 for comfortable spacing
-        width = 116
-        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<20} │ {'Down (total | 1h)':<20} │ {'Uptime':<14} │ {'Mbps (total | 1h)':<17} │\n"
-#        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<20} │ {'Down (total | 1h)':<20} │ {'Uptime':<14} │ {'Mbps':<6} │\n"
-        sep = "├" + "─"*22 + "┼" + "─"*10 + "┼" + "─"*22 + "┼" + "─"*22 + "┼" + "─"*16 + "┼" + "─"*19 + "┤\n"
+        width = 121
+        head = f"│ {'Name/IP':<20} │ {'Clients':<8} │ {'Up (total | 1h)':<22} │ {'Down (total | 1h)':<22} │ {'Uptime':<14} │ {'Mbps (total | 1h)':<17}  │\n"
+        sep = "├" + "─"*22 + "┼" + "─"*10 + "┼" + "─"*24 + "┼" + "─"*24 + "┼" + "─"*16 + "┼" + "─"*20 +  "┤\n"
         
         body = ""
         valid_results = [r for r in results if r["success"]]
-        
+
         for r in results:
             status = "✓" if r["success"] else "✗"
             if r["success"]:
-                # Clients is now just the average integer string
-                # Traffic format: "Total | Delta"
-                up_val = f"{r['up']} | {r['up_1h']}"
-                down_val = f"{r['down']} | {r['down_1h']}"
-                mbps_vals = f"{r['mbps']} | {r['mbps_1h']}"
+                uptime = self.seconds_to_uptime(r['uptime'])
                 
-                body += f"│ {status} {r['label'][:18]:<18} │ {r['clients']:<8} │ {up_val:<20} │ {down_val:<20} │ {r['uptime']:<14} │ {mbps_vals:<14}    │\n"
+                # 1. Format raw bytes to strings
+                u_tot = self.format_bytes(r['up'])
+                u_1h  = self.format_bytes(r['up_1h'])
+                d_tot = self.format_bytes(r['down'])
+                d_1h  = self.format_bytes(r['down_1h'])
+                m_tot = r['mbps']
+                m_1h  = r['mbps_1h']
+                
+                # 2. Build fixed-width display strings
+                # We allocate 10 chars for Total (right-aligned) and 9 for 1h (left-aligned)
+                up_display    = f"{u_tot:>10} | {u_1h:<9}"
+                down_display  = f"{d_tot:>10} | {d_1h:<9}"
+                mbps_display  = f"{m_tot:>6} | {m_1h:<6}"
+                
+                # 3. Add to body with a fixed column width of 22
+                body += f"│ {status} {r['label'][:18]:<18} │ {r['clients']:<8} │ {up_display:<22} │ {down_display:<22} │ {uptime:<14} │ {mbps_display:<14}    │\n"
             else:
-                body += f"│ {status} {r['label'][:18]:<18} │ {'-':<8} │ {'-':<20} │ {'-':<20} │ {r['uptime']:<14} │ {'0.00 | 0.00':<14}    │\n"
-        
+                uptime = r.get("uptime_str", "Conn Error")
+                body += f"│ {status} {r['label'][:18]:<18} │ {'-':<8} │ {'-':^22} │ {'-':^22} │ {uptime:<14} │ {'0.00 | 0.00':<14}    │\n"
+
         main_table = f"┌" + "─"*width + "┐\n" + head + sep + body + "└" + "─"*width + "┘"
 
         # 2. Analytics Summary Logic
@@ -939,17 +956,20 @@ class StatsWorker(QThread):
         ts = (datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
         
         # Clients are already stored as average strings, so we convert back to int for analytics
-        clients_list = [int(r["clients"]) for r in valid_results if r["clients"].isdigit()]
+        clients_list = [r["clients"] for r in valid_results if r["clients"]]
         total_clients = sum(clients_list)        
-        ups = [self.parse_to_bytes(r["up"]) for r in valid_results]
-        downs = [self.parse_to_bytes(r["down"]) for r in valid_results]
+
+        ups = [r["up"] for r in valid_results]
+        downs = [r["down"] for r in valid_results]
+
         mbps_list = [r["mbps_val"] for r in valid_results]
 
         server_count = len(valid_results)
         total_up_all = sum(ups)
         total_down_all = sum(downs)
-        total_up_1h = sum([self.parse_to_bytes(r["up_1h"]) for r in valid_results])
-        total_down_1h = sum([self.parse_to_bytes(r["down_1h"]) for r in valid_results])
+
+        total_up_1h = sum([r["up_1h"] for r in valid_results])
+        total_down_1h = sum([r["down_1h"] for r in valid_results])
 
         out = []
         out.append(f"\n--- Analytics Summary (Iran Time: {ts}) ---")
@@ -983,7 +1003,6 @@ class StatsWorker(QThread):
         out.append(get_stat_row("Avg Mbps", mbps_list))
 
         return main_table + "\n" + "\n".join(out)
-
 
 class DeployWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -1231,6 +1250,16 @@ WantedBy=multi-user.target"""
                 
                 # 5. Download conduit-monitor.sh Script from GitHub
                 # We use the 'raw' GitHub URL to get the actual code, not the HTML page
+                # in case this is a re-deployment
+                # This stops it, and if it takes more than 5 seconds, it kills it instantly.
+                # Then it deletes the file.
+                cmd = (
+                    f"systemctl stop conduit-monitor{AppState.conduit_id} --timeout=5s; "
+                    f"systemctl kill -s SIGKILL conduit-monitor{AppState.conduit_id} 2>/dev/null; "
+                    f"rm -f /opt/conduit{AppState.conduit_id}/conduit-monitor.sh"
+                )
+                run_cmd(cmd, warn=True, hide=True)
+
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/conduit-monitor.sh"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit-monitor.sh {stats_script_url}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit-monitor.sh")
@@ -1484,7 +1513,7 @@ WantedBy=multi-user.target"""
 
                 # 5. Start
                 run_cmd(f"systemctl start conduit{AppState.conduit_id}", hide=True)                
-                                                
+                                              
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
@@ -1500,18 +1529,34 @@ WantedBy=multi-user.target"""
                     run_cmd(f'mv {filename} {backup_log}', hide=True)
                 else:
                     print(f"Skipping backup: {filename} does not exist.")
-                                
+                                                
+                # Use a variable to avoid repeating the sed logic
+                '''
+                target_service = f"conduit{AppState.conduit_id}.service" if AppState.conduit_id else "conduit.service"
+                new_service = f"conduit-monitor{AppState.conduit_id}.service" if AppState.conduit_id else "conduit-monitor.service"
+                # Escape the dot for sed (e.g., conduit\.service)
+                pattern_old = target_service.replace(".", r"\.")
+                # The '|| true' ensures that if crontab is empty, we don't crash or wipe it
+                full_cmd = f"(crontab -l 2>/dev/null || true) | sed 's/{pattern_old}/{new_service}/g' | crontab -"
+                run_cmd(full_cmd)
+                '''
+                
                 # Setup Cronjob (Idempotent: prevents duplicate entries)
                 cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
                 search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
-
+                
                 # Download conduit-monitor.sh Script from GitHub
 
-                run_cmd(f"systemctl stop conduit-monitor{AppState.conduit_id}", warn=True, hide=True)
-                time.sleep(2)
-                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit-monitor.sh", warn=True, hide=True)
+                # This stops it, and if it takes more than 5 seconds, it kills it instantly.
+                # Then it deletes the file.
+                cmd = (
+                    f"systemctl stop conduit-monitor{AppState.conduit_id} --timeout=5s; "
+                    f"systemctl kill -s SIGKILL conduit-monitor{AppState.conduit_id} 2>/dev/null; "
+                    f"rm -f /opt/conduit{AppState.conduit_id}/conduit-monitor.sh"
+                )
+                run_cmd(cmd, warn=True, hide=True)
 
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/conduit-monitor.sh"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit-monitor.sh {stats_script_url}", hide=True)
@@ -1530,7 +1575,8 @@ WantedBy=multi-user.target"""
                     messages.append(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
                 else:
                     current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
-
+                
+                
                 messages.append(f"[OK] {s['ip']} successfully upgraded to conduit version {version_tag}.")
                 messages = " ".join(messages)
                 return messages
@@ -3393,26 +3439,28 @@ class VisualizerWindow(QMainWindow):
         except:
             return 0
 
-    def parse_record(self,line):
-        # Dynamic detection of version
-        if "Connecting" in line:
-            pattern = r"(\d{4}-\d{2}-\d{2}.\d{2}:\d{2}:\d{2}).*?Connected:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
-            match = re.search(pattern, line)
-            if match: return match.groups()
-        else:
-            pattern = r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})[+-]\d{4}.*?Clients:\s*(\d+).*?Up:\s*([\d\.]+\s*\w+).*?Down:\s*([\d\.]+\s*\w+)"
-            match = re.search(pattern, line)
-            if match:
-                # Constructing the list of 4
-                result = [
-                    f"{match.group(1)} {match.group(2)}", 
-                    match.group(3),                       
-                    match.group(4),                       
-                    match.group(5)                        
-                ]
-                return result
-            else:
-                return None
+    def parse_record(self, line):
+        parts = line.strip().split(',')
+        if len(parts) < 4:
+            return None
+
+        dt_raw = parts[0]
+        numbers = []
+
+        # Loop through the data parts (clients, up, down)
+        for p in parts[1:]:
+            # Only process if it looks like "key=value"
+            if '=' in p:
+                val_str = p.split('=')[1]
+                if val_str.isdigit():
+                    numbers.append(int(val_str))
+
+        # Only return if we successfully found exactly 3 numbers
+        if len(numbers) == 3:
+            clients = numbers[0]
+            up = numbers[1]
+            down = numbers[2]
+            return [dt_raw, clients, up, down]
 
         return None
 
@@ -3433,18 +3481,18 @@ class VisualizerWindow(QMainWindow):
                 for line in r:
                     # 1. Regex to extract: Date, Clients, UP, DOWN
                     if (res := self.parse_record(line)) is not None:
-                        dt_raw, clients, up_str, down_str = res
+                        dt_raw, clients, up_bytes, down_bytes = res
                     
                         # 2. Format data
-                        dt = dt_raw.replace('T', ' ')
-                        up_bytes = self.parse_to_bytes(up_str)
-                        down_bytes = self.parse_to_bytes(down_str)                    
+#                        dt = dt_raw.replace('T', ' ')
+                        dt_obj = datetime.fromisoformat(dt_raw)
+                        dt = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
                         # 3. Write standardized columns
                         f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
                         valid_lines += 1
         
             # Optional: Remove the raw file to save space after processing
-            os.remove(raw_path)
+#            os.remove(raw_path)
             print(f"✅ {ip}: Processed {valid_lines} lines.")
         
         except Exception as e:
@@ -3819,8 +3867,6 @@ class VisualizerWindow(QMainWindow):
             avg_clients = round(sum(current_batch_clients) / len(current_batch_clients))
             avg_ups = int(sum(current_batch_ups) / len(current_batch_ups))
             decimated.append((last_ts, avg_clients, avg_ups, anchor_down))
-        print('decimated: ',len(decimated))
-#        return decimated
 
         # 1. Convert timestamps to unix floats
         # Assuming d[0] is a datetime object from your previous parsing step
