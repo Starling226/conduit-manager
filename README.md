@@ -126,9 +126,11 @@ After installation, the Psiphon network requires time for vetting and propagatio
 * **Health:** Health display the current server health incluidng CPU and Memory usage for all the servers in real time in a new window. Depending on display mode it can display server name or IP address. You can change the display mode by clicking on Health Button, it quickly changes the display mode without launching a fresh window.
 * **Secondary:** If your bandwidth is not effectively used you can check this and deploy a new conduit instance. When checked every operation will be done on the seconday instance. This includes Traffic and Report Visualization. If a server does not have the second instance, it will be displayed in red color in Status Table and so, it will not be included in Traffic and Report graphs. You can switch between checked and unchecked to see the state of each group of instances. **Please note when deploying a server for the first time leave it as unchecked.** You can launch two instance of ConduitQt.py and check The Secondary checkbox in one and manage and monitor the secondary conduit servers independently.
 * **Sun & Lion:** If you like to restrict your conduit connection only from Shir O Khorshid Android app, enable this before deployment. Clients who use Psiphon Android app will be ignored. 
+* **Timezone:** Conduit logs are stored in UTC time and they will be displayed in client selected timezone
 ## Important Notes
 * **SSH Port:** These scripts use the standard **SSH Port 22** for all connections y default, unless you choose a different port.
 * **Security Warning:** The `servers.txt` or `servers.json` files contains plain-text passwords. **DO NOT** upload this file to GitHub.
+
 
 ---
 
