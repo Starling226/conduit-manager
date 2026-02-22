@@ -12,6 +12,8 @@ import numpy as np
 import json
 import requests
 import socket
+import subprocess
+import zoneinfo
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QGridLayout,
@@ -54,7 +56,7 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.5.0"
 
 class AppState:
     use_lion_sun = False
@@ -333,16 +335,20 @@ class ServerDialog(QDialog):
         self.layout = QFormLayout(self)
         self.layout.setContentsMargins(15, 15, 15, 15)
         self.layout.setSpacing(10)
+        timezone = self.get_timezone()
 
         self.name_edit = QLineEdit(data['server'] if data else "")
         self.ip_edit = QLineEdit(data['ip'] if data else "")
+        self.tz_edit = QLineEdit(data['timezone'] if data else timezone)
         self.port_edit = QLineEdit(str(data['port']) if data else "22")
         self.user_edit = QLineEdit(data['user'] if data else "root")
         self.pass_edit = QLineEdit(data['password'] if data else "")
         self.pass_edit.setEchoMode(QLineEdit.Password)
-        
+        self.tz_edit.setMinimumWidth(160)
+
         self.layout.addRow("Name:", self.name_edit)
         self.layout.addRow("IP/Hostname:", self.ip_edit)
+        self.layout.addRow("Timezone:", self.tz_edit)
         self.layout.addRow("Port:", self.port_edit)
         self.layout.addRow("Username:", self.user_edit)
         self.layout.addRow("Password:", self.pass_edit)
@@ -360,11 +366,42 @@ class ServerDialog(QDialog):
         return {
             "server": self.name_edit.text().strip(),
             "ip": self.ip_edit.text().strip(),
+            "timezone": self.tz_edit.text().strip(),
             "port": self.port_edit.text().strip(),
             "user": self.user_edit.text().strip(),
             "password": self.pass_edit.text().strip()
         }
 
+    def get_timezone(self):
+        current_os = platform.system()
+        try:
+            if current_os == "Windows":
+                # 1. Get the Timezone Name (e.g., 'Iran Standard Time')
+                # 2. Get the Offset using PowerShell (returns format like '+0330')
+                name_cmd = "tzutil /g"
+                offset_cmd = "powershell (Get-Date -Format 'zzzz').Replace(':', '')"
+            
+                tz_name = subprocess.check_output(name_cmd, shell=True, text=True).strip()
+                offset_str = subprocess.check_output(offset_cmd, shell=True, text=True).strip()
+            
+            elif current_os == "Darwin":  # macOS
+                # Use readlink to avoid sudo requirements on Mac
+                cmd = "readlink /etc/localtime | sed 's/.*zoneinfo\///' && date +%z"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+                parts = result.stdout.strip().split()
+                tz_name, offset_str = parts[0], parts[1]
+            
+            else:  # Linux (Rocky/Debian/Ubuntu)
+                cmd = "printf '%s %s' $(timedatectl show --property=Timezone --value) $(date +%z)"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+                tz_name, offset_str = result.stdout.strip().split()
+
+            print(f"✅ Local System ({current_os}): {tz_name} ({offset_str})")
+            return f"{tz_name} {offset_str}"
+
+        except Exception as e:
+            print(f"❌ Error getting time zone on {current_os}: {e}")
+            return ""
 
 class AutoStatsWorker(QThread):
     # This signal sends the raw list of dictionaries to update_stats_table
@@ -1006,7 +1043,7 @@ class StatsWorker(QThread):
 
 class DeployWorker(QThread):
     log_signal = pyqtSignal(str)
-    remove_password_signal = pyqtSignal(str)
+    update_time_zone = pyqtSignal(dict) # { 'ip': 'timezone_string' }    
 
     def __init__(self, action, targets, params, client_ip):
         super().__init__()
@@ -1023,6 +1060,8 @@ class DeployWorker(QThread):
             self.log_signal.emit(f"[ERROR] Public key not found at: {pub_key_path}")
             return
 
+        collected_timezones = {}
+
         with open(pub_key_path, "r") as f:
             pub_key_content = f.read().strip()
 
@@ -1030,7 +1069,18 @@ class DeployWorker(QThread):
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [executor.submit(self.deploy_task, s, pub_key_content) for s in self.targets]
                 for f in as_completed(futures):
-                    self.log_signal.emit(f.result())
+                    success, message, tz_data, ip = f.result()
+                    self.log_signal.emit(message)
+
+                    # If successful and we got a timezone, add to our batch
+                    if success and tz_data:
+                        collected_timezones[ip] = tz_data
+
+
+            # After ALL threads are done, emit the batch update
+
+            if collected_timezones:
+                self.update_time_zone.emit(collected_timezones)
 
         elif self.action == "upgrade":
             with ThreadPoolExecutor(max_workers=5) as executor:
@@ -1048,6 +1098,7 @@ class DeployWorker(QThread):
             key_path = os.path.join(home, ".ssh", "id_conduit")
             port_num = int(s['port'])
             ssh_port = int(s['port'])
+            target_ip = s['ip']
 
             if self.params['default_port']:
                 ssh_port = 22
@@ -1093,7 +1144,7 @@ class DeployWorker(QThread):
             exec_cmd = " ".join(cmd_parts)
             messages = []
 
-            with Connection(host=s['ip'], 
+            with Connection(host=target_ip, 
                             user=user,
                             port=ssh_port, 
                             connect_kwargs=connect_params,
@@ -1116,7 +1167,7 @@ class DeployWorker(QThread):
 
                 res = run_cmd("id -u",hide=True, warn=True)
                 if not res.ok:
-                    return f"[SKIP] {s['ip']}: Could not connect or not root."
+                    return f"[SKIP] {target_ip}: Could not connect or not root."
                 
                 # 1. Key Injection
                 if not AppState.use_sec_inst:
@@ -1391,15 +1442,23 @@ WantedBy=multi-user.target"""
                     else:
                         run_cmd("systemctl restart ssh", hide=True)
                     
-#                if pwd:
-#                    self.remove_password_signal.emit(s['ip'])
-                
-                messages.append(f"[OK] {s['ip']} successfully deployed (Manual Service Config).")
+                # getting the server timezone
+                tz_string=""
+
+                cmd = "printf '%s %s' $(timedatectl show --property=Timezone --value) $(date +%z)"
+                tz_info_raw = run_cmd(cmd, hide=True).stdout.strip()
+
+                if tz_info_raw and " " in tz_info_raw:
+                    tz_name, offset_str = tz_info_raw.split()
+                    tz_string = f"{tz_name} {offset_str}"
+
+                messages.append(f"[OK] {target_ip} successfully deployed (Manual Service Config).")
                 messages = " ".join(messages)
-                return messages
+
+                return (True, messages, tz_string, target_ip)
 
         except Exception as e:
-            return f"[ERROR] {s['ip']} failed: {str(e)}"
+            return (False, f"[ERROR] {target_ip} failed: {str(e)}", "", target_ip)
 
     def upgrade_task(self, s):
         try:
@@ -1593,50 +1652,85 @@ class ConduitGUI(QMainWindow):
         self.server_data = [] 
         self.current_path = ""
 
+        self.selected_timezone = {"region": "UTC", "offset": "+0000"}
         # Timer for Auto-Refresh
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.run_auto_stats)
-        self.server_data=[]
+
         self.init_ui()
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         json_server_path = os.path.join(script_dir, "servers.json")
-
         self.load_servers_from_json(json_server_path)
 
     def init_ui(self):
-        central = QWidget(); self.setCentralWidget(central)
+        
+# Main Central Widget
+        central = QWidget()
+        self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # UI Components Setup (Labels, Edits, Frames)
-        file_box = QHBoxLayout()
-        self.btn_import = QPushButton("Import servers.txt")
+        # --- 1. Menu Bar Setup ---
+        menubar = self.menuBar()
+        menubar.setNativeMenuBar(False) 
+        
+        file_menu = menubar.addMenu('&File')
+
+        # Import Action
+        import_action = QAction('Import servers file', self)
+        import_action.triggered.connect(self.import_srv)
+        file_menu.addAction(import_action)
+
+        # Set Timezone Action
+        tz_action = QAction('Set Timezone', self)
+        tz_action.triggered.connect(self.select_timezone_dialog)
+        file_menu.addAction(tz_action)
+
+        file_menu.addSeparator()
+
+        # Exit Action
+        exit_action = QAction('Exit', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # --- 2. Moving Labels to Menu Bar ---
+        # Create a container widget for the right side of the Menu Bar
+        right_menu_widget = QWidget()
+        right_menu_layout = QHBoxLayout(right_menu_widget)
+        right_menu_layout.setContentsMargins(0, 0, 10, 0)
+        right_menu_layout.setSpacing(20)
+
+        # Shared Style for the Labels
+        lbl_style = "color: gray; font-style: italic; font-size: 11px; border: none;"
+
+        # Path Label (Left in menu area)
         self.lbl_path = QLabel("No file loaded")
-        file_box.addWidget(self.btn_import);
-        file_box.addWidget(self.lbl_path); 
-        file_box.addStretch(1)
+        self.lbl_path.setStyleSheet(lbl_style)
+        right_menu_layout.addWidget(self.lbl_path)
 
+        # Timezone Label (Middle in menu area)
+        self.lbl_timezone = QLabel("") 
+        self.lbl_timezone.setStyleSheet(lbl_style)
+        right_menu_layout.addWidget(self.lbl_timezone)
+
+        # Version Info (Right in menu area)
         try:
-            # Automatically extract 'version' from the URL
             version_tag = CONDUIT_URL.split('/')[-2]
-        except (NameError, IndexError):
+        except:
             version_tag = "Unknown"
-
-# Combine them or stack them
-
         version_text = f"Manager: v{APP_VERSION} | Conduit: {version_tag}"
+        
         self.lbl_version = QLabel(version_text)
-        self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
+        self.lbl_version.setStyleSheet(lbl_style)
+        right_menu_layout.addWidget(self.lbl_version)
 
-#        self.lbl_version = QLabel(f"Conduit Version: {version_tag}")
-#        self.lbl_version.setStyleSheet("color: gray; font-style: italic; font-size: 11px;")
-        
-        # This stretch pushes everything after it to the right wall
-#        file_box.addStretch(1) 
-        
-        file_box.addWidget(self.lbl_version)
-        
-        layout.addLayout(file_box)
+        # Set the container as the corner widget of the menubar
+        menubar.setCornerWidget(right_menu_widget, Qt.TopRightCorner)
+        self.setMenuBar(menubar)
+
+        # --- 3. Initial Load of Config ---
+        self.load_timezone_config()
 
         cfgs_frame = QFrame(); 
         cfgs_frame.setFrameShape(QFrame.StyledPanel)
@@ -1869,7 +1963,7 @@ class ConduitGUI(QMainWindow):
         layout.addWidget(self.console)
 
         # Connection Slots
-        self.btn_import.clicked.connect(self.import_srv)
+#        self.btn_import.clicked.connect(self.import_srv)
         self.btn_add.clicked.connect(self.add_srv)
         self.btn_edit.clicked.connect(self.edit_srv)
         self.btn_to_sel.clicked.connect(self.move_to_sel)
@@ -1913,6 +2007,77 @@ class ConduitGUI(QMainWindow):
 
         self.update_timer_interval() # Initialize timer
 
+    def get_timezone(self):
+        current_os = platform.system()
+        try:
+            if current_os == "Windows":
+                # 1. Get the Timezone Name (e.g., 'Iran Standard Time')
+                # 2. Get the Offset using PowerShell (returns format like '+0330')
+                name_cmd = "tzutil /g"
+                offset_cmd = "powershell (Get-Date -Format 'zzzz').Replace(':', '')"
+            
+                tz_name = subprocess.check_output(name_cmd, shell=True, text=True).strip()
+                offset_str = subprocess.check_output(offset_cmd, shell=True, text=True).strip()
+            
+            elif current_os == "Darwin":  # macOS
+                # Use readlink to avoid sudo requirements on Mac
+                cmd = "readlink /etc/localtime | sed 's/.*zoneinfo\///' && date +%z"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+                parts = result.stdout.strip().split()
+                tz_name, offset_str = parts[0], parts[1]
+            
+            else:  # Linux (Rocky/Debian/Ubuntu)
+                cmd = "printf '%s %s' $(timedatectl show --property=Timezone --value) $(date +%z)"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+                tz_name, offset_str = result.stdout.strip().split()
+
+            print(f"✅ Local System ({current_os}): {tz_name} ({offset_str})")
+            return f"{tz_name} {offset_str}"
+
+        except Exception as e:
+            print(f"❌ Error getting time zone on {current_os}: {e}")
+            return ""
+
+    def load_timezone_config(self):
+        """Reads timezone.conf and updates the UI Label & Dict"""
+        if os.path.exists("timezone.conf"):
+            try:
+                with open("timezone.conf", "r") as f:
+                    content = f.read().strip()
+                    if " " in content:
+                        region, offset = content.split(" ", 1)
+                        self.selected_timezone = {"region": region, "offset": offset}
+                        self.lbl_timezone.setText(f"🌍 {content}")
+            except Exception as e:
+                region, offset = self.get_timezone().split(" ",1)
+                self.selected_timezone = {"region": region, "offset": offset}
+                QMessageBox.warning(self, "Warning", f"Error reading timezone.conf: {e}")
+
+    def select_timezone_dialog(self):
+        """Generates list of IANA zones and shows a selection dialog"""
+        # Generate list using the cross-platform zoneinfo method
+        all_zones = []
+        now = datetime.now(timezone.utc)
+        
+        for zone in sorted(zoneinfo.available_timezones()):
+            if '/' in zone:
+                offset = now.astimezone(zoneinfo.ZoneInfo(zone)).strftime('%z')
+                all_zones.append(f"{zone} {offset}")
+
+        # Show Selection Dialog
+        choice, ok = QInputDialog.getItem(self, "Select Timezone", 
+                                        "Available Regions:", all_zones, 0, False)
+        
+        if ok and choice:
+            # Update File
+            with open("timezone.conf", "w") as f:
+                f.write(choice)
+            
+            # Update GUI and Class Dict
+            region, offset = choice.split(" ", 1)
+            self.selected_timezone = {"region": region, "offset": offset}
+            self.lbl_timezone.setText(f"🌍 {choice}")
+            print(f"Timezone preference saved: {choice}")
 
     def lion_sun_status(self):
 
@@ -1974,7 +2139,7 @@ class ConduitGUI(QMainWindow):
 
     def open_report(self):
         if not hasattr(self, 'rep_window'):
-            self.report_window = VisualizerReportWindow(self.server_data, self.console)
+            self.report_window = VisualizerReportWindow(self.server_data, self.console, self.selected_timezone)
         self.report_window.show()
         self.report_window.raise_() # Bring to front
 
@@ -2009,7 +2174,7 @@ class ConduitGUI(QMainWindow):
 
     def open_visualizer(self):
         if not hasattr(self, 'viz_window'):
-            self.viz_window = VisualizerWindow(self.server_data, self.console)
+            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
         self.viz_window.show()
         self.viz_window.raise_() # Bring to front
         # Trigger initial fetch for current day
@@ -2362,7 +2527,7 @@ class ConduitGUI(QMainWindow):
         
         self.deploy_thread = DeployWorker("deploy",valid_targets, params, client_ip)
         self.deploy_thread.log_signal.connect(lambda m: self.console.appendPlainText(m))
-#        self.deploy_thread.remove_password_signal.connect(self.remove_password_from_file)
+        self.deploy_thread.update_time_zone.connect(self.update_time_zone_json)
         self.deploy_thread.finished.connect(lambda: self.btn_deploy.setEnabled(True))
         self.deploy_thread.finished.connect(lambda: self.btn_deploy.setText("Deploy"))
         
@@ -2747,7 +2912,8 @@ class ConduitGUI(QMainWindow):
             server = d.get('server', '').strip()
             ip = d.get('ip', '').strip()
             port = d.get('port', '').strip()
-
+            timezone = d.get('timezone', '').strip()
+            
             # 1. Validate Name
             if not server:
                 QMessageBox.critical(self, "Invalid Name", "Server Name cannot be empty.")
@@ -2831,6 +2997,7 @@ class ConduitGUI(QMainWindow):
                 entry = {
                     "server": s.get('server', ''),
                     "ip": s.get('ip', ''),
+                    "timezone": s.get('timezone', ''),
                     "port": int(s.get("port", 22)) if s.get("port") else 22,
                     "user": s.get('user', ''),
                     "password": s.get('password', '')  # Standardizing to 'password'
@@ -2877,6 +3044,100 @@ class ConduitGUI(QMainWindow):
         self.worker.log_signal.connect(lambda m: self.console.appendPlainText(m))
         self.worker.start()
 
+    def update_time_zone_json(self, tz_map):
+        """
+        tz_map: {'1.2.3.4': 'Asia/Tehran +0330', ...}
+        Only saves to disk if at least one value is different from what's currently stored.
+        """
+        filename = "servers.json"
+        if not os.path.exists(filename):
+            return
+
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                servers = json.load(f)
+
+            file_needs_update = False
+            updated_list = []
+
+            for s in servers:
+                ip = s.get("ip")
+            
+                # Check if this IP is in our new results
+                if ip in tz_map:
+                    new_tz = tz_map[ip]
+                    current_tz = s.get("timezone", "")
+
+                    # Only mark for update if the value is actually different
+                    if new_tz != current_tz:
+                        file_needs_update = True
+                    
+                        # Rebuild entry to ensure 'timezone' is placed after 'ip'
+                        new_entry = {}
+
+                        for k, v in s.items():
+                            if k == "timezone":
+                                continue
+
+                            new_entry[k] = v
+
+                            if k == "ip":
+                                new_entry["timezone"] = new_tz
+                        updated_list.append(new_entry)
+                    else:
+                        # No change for this specific server
+                        updated_list.append(s)
+                else:
+                    # Server not in the deployment batch
+                    updated_list.append(s)
+
+            # Final check: Only write to disk if something changed
+            if file_needs_update:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(updated_list, f, indent=4)
+                
+                self.console.appendPlainText(f"💾 servers.json updated (changes detected).")
+            else:
+                self.console.appendPlainText("ℹ️ No timezone changes detected; servers.json remains unchanged.")
+
+        except Exception as e:
+            self.console.appendPlainText(f"❌ Failed to process timezone update: {e}")
+
+    def update_time_zone_json2(self, tz_map):
+        """
+        tz_map: {'1.2.3.4': 'Asia/Tehran +0330', ...}
+        This is called via the signal after ALL threads finish.
+        """
+        filename = "servers.json"
+        if not os.path.exists(filename):
+            return
+
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                servers = json.load(f)
+
+            updated_list = []
+            for s in servers:
+                ip = s.get("ip")
+                if ip in tz_map:
+                    # Rebuild entry to put timezone after ip
+                    new_entry = {}
+                    for k, v in s.items():
+                        new_entry[k] = v
+                        if k == "ip":
+                            new_entry["timezone"] = tz_map[ip]
+                    updated_list.append(new_entry)
+                else:
+                    updated_list.append(s)
+
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(updated_list, f, indent=4)
+        
+            self.log_signal.emit(f"✅ Batch updated timezones for {len(tz_map)} servers in servers.json")
+
+        except Exception as e:
+            self.log_signal.emit(f"❌ Failed to batch update servers.json: {e}")
+
     def remove_password_from_file(self,target_ip):
         filename = "servers.txt"
         if not os.path.exists(filename):
@@ -2892,24 +3153,24 @@ class ConduitGUI(QMainWindow):
                 parts = [p.strip() for p in line.split(',')]
 
                 # Basic requirement: server, ip, port, user
-                if len(parts) >= 4:
+                if len(parts) >= 6:
                     # 1. IP Validation
                     if not self.is_valid_ip(parts[1].strip()):
                         continue
 
                     # 2. Port Validation
                     try:
-                        port_num = int(parts[2].strip())
+                        port_num = int(parts[3].strip())
                         if not (1 <= port_num <= 65535):
                             raise ValueError
                     except ValueError:
                         continue
 
                 if parts[1] == target_ip:
-                    if parts[3] == "root":
+                    if parts[4] == "root":
                         # Reconstruct line without the password
                         # Format: server, ip, port, user, 
-                        new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, "
+                        new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, {parts[4].strip()}, "
                         updated_lines.append(new_line)
                     else:
                         updated_lines.append(line)
@@ -2933,7 +3194,7 @@ class ConduitGUI(QMainWindow):
                 parts = [p.strip() for p in line.split(',')]
 
                 # Basic requirement: server, ip, port, user
-                if len(parts) < 5: continue
+                if len(parts) < 6: continue
 
                 # 1. IP Validation
                 if not self.is_valid_ip(parts[1].strip()):
@@ -2941,15 +3202,15 @@ class ConduitGUI(QMainWindow):
 
                 # 2. Port Validation
                 try:
-                    port_num = int(parts[2].strip())
+                    port_num = int(parts[3].strip())
                     if not (1 <= port_num <= 65535):
                         raise ValueError
                 except ValueError:
                     continue
 
                 if parts[1] == target_ip:
-                    if parts[3] == "root":
-                        return parts[3].strip(),parts[4].strip()
+                    if parts[4] == "root":
+                        return parts[4].strip(),parts[5].strip()
                     else:
                         return "", ""
 
@@ -2972,7 +3233,7 @@ class ConduitGUI(QMainWindow):
                         continue
 
                     parts = [p.strip() for p in line.split(',')]
-                    if len(parts) < 4:
+                    if len(parts) < 6:
                         self.console.appendPlainText(
                             f"[NOTICE] Line {i}: too few fields ({len(parts)}), skipped."
                         )
@@ -2980,6 +3241,7 @@ class ConduitGUI(QMainWindow):
 
                     server_name = parts[0].strip()
                     ip = parts[1].strip()
+                    timezone = parts[2].strip()
 
                     # 1. IP Validation
                     if not self.is_valid_ip(ip):
@@ -2990,12 +3252,12 @@ class ConduitGUI(QMainWindow):
 
                     # 2. Port Validation
                     try:
-                        port_num = int(parts[2].strip())
+                        port_num = int(parts[3].strip())
                         if not (1 <= port_num <= 65535):
                             raise ValueError
                     except ValueError:
                         self.console.appendPlainText(
-                            f"[NOTICE] Line {i}: Invalid port '{parts[2]}' for '{server_name}'. Skipped."
+                            f"[NOTICE] Line {i}: Invalid port '{parts[3]}' for '{server_name}'. Skipped."
                         )
                         continue
 
@@ -3018,9 +3280,10 @@ class ConduitGUI(QMainWindow):
                     d = {
                         'server': server_name,
                         'ip': ip,
+                        'timezone': timezone,
                         'port': str(port_num),  # string – good for fabric/invoke
-                        'user': parts[3].strip(),
-                        'password': parts[4].strip() if len(parts) > 4 else ''
+                        'user': parts[4].strip(),
+                        'password': parts[5].strip() if len(parts) > 5 else ''                        
                     }
 
                     self.server_data.append(d)
@@ -3076,10 +3339,12 @@ class ConduitGUI(QMainWindow):
                 s_pass = item.get("password", item.get("password", ""))
                 s_port = str(item.get("port", "22"))
                 s_user = item.get("user", "root")
+                timezone = item.get("timezone", item.get("timezone", "")).strip()
 
                 entry = {
                     "server": s_name,
                     "ip": s_ip,
+                    "timezone": timezone,
                     "port": s_port,
                     "user": s_user,
                     "password": s_pass
@@ -3121,13 +3386,14 @@ class ConduitGUI(QMainWindow):
             with open(input_file, 'r') as f:
                 for line in f:
                     data = line.strip().split(',')
-                    if len(data) == 5:
+                    if len(data) == 6:
                         server_entry = {
                             "server": data[0].strip(),
                             "ip": data[1].strip(),
-                            "port": int(data[2].strip()),
-                            "user": data[3].strip(),
-                            "password": data[4].strip()
+                            "timezone": data[2].strip(),
+                            "port": int(data[3].strip()),
+                            "user": data[4].strip(),
+                            "password": data[5].strip()
                         }
                         servers_list.append(server_entry)
 
@@ -3142,10 +3408,11 @@ class ConduitGUI(QMainWindow):
 
 
 class VisualizerWindow(QMainWindow):
-    def __init__(self, server_list, console):
+    def __init__(self, server_list, console, selected_timezone):
         super().__init__()
         self.setWindowTitle("Conduit Network Traffic Analytics")
         self.resize(1400, 850)
+        self.selected_timezone = selected_timezone
         self.server_list = copy.deepcopy(server_list)
 
         d = {
@@ -3464,6 +3731,32 @@ class VisualizerWindow(QMainWindow):
 
         return None
 
+    def process_to_utc(self, dt_str, offset_str):
+        """
+        dt_str: '2026-02-21 15:22:14' (from your journalctl log)
+        offset_str: '+0330' (from your remote check)
+        """
+
+        try:
+            # 1. Parse the offset (+/- HHMM)
+            sign = 1 if offset_str[0] == '+' else -1
+            hours = int(offset_str[1:3])
+            minutes = int(offset_str[3:5])
+        
+            # 2. Create the Remote Timezone object
+            remote_tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+        
+            # 3. Parse the log date and attach the remote timezone
+            local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=remote_tz)
+        
+            # 4. Convert to UTC
+            utc_dt = local_dt.astimezone(timezone.utc)
+        
+            return utc_dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception as e:
+            print(f"⚠️ Error converting time: {e}")
+            return dt_str # Return original if conversion fails   
+
     def process_raw_file(self, ip):
         """
         Takes the raw journalctl output and converts it to a clean tab-separated log.
@@ -3474,6 +3767,12 @@ class VisualizerWindow(QMainWindow):
     
         if not os.path.exists(raw_path):
             return
+
+        offset_str = ""
+        for s in self.server_list:
+            if s.get("ip") == ip:
+                region, offset_str = s.get("timezone").split()
+                break
 
         valid_lines = 0
         try:
@@ -3487,12 +3786,14 @@ class VisualizerWindow(QMainWindow):
 #                        dt = dt_raw.replace('T', ' ')
                         dt_obj = datetime.fromisoformat(dt_raw)
                         dt = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+                        if offset_str:
+                            dt = self.process_to_utc(dt, offset_str)
                         # 3. Write standardized columns
                         f.write(f"{dt}\t{clients}\t{up_bytes}\t{down_bytes}\n")
                         valid_lines += 1
         
             # Optional: Remove the raw file to save space after processing
-#            os.remove(raw_path)
+            os.remove(raw_path)
             print(f"✅ {ip}: Processed {valid_lines} lines.")
         
         except Exception as e:
@@ -3896,6 +4197,59 @@ class VisualizerWindow(QMainWindow):
         print(f'Decimated: {len(decimated)} | Resampled: {len(final_result)}')
         return final_result
 
+    def convert_utc_to_selected(self, dt_input, target_offset_str):
+        """
+        dt_input: Can be a '2026-02-21...' string OR a datetime object (from decimation)
+        target_offset_str: '+0330'
+        """
+        try:
+            # 1. Get a datetime object regardless of input type
+            if isinstance(dt_input, str):
+                utc_dt = datetime.strptime(dt_input, "%Y-%m-%d %H:%M:%S")
+            else:
+                utc_dt = dt_input  # It's already a datetime object
+            
+            # 2. Ensure it is marked as UTC
+            utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+
+            # 3. Parse your selected offset (+/- HHMM)
+            sign = 1 if target_offset_str[0] == '+' else -1
+            hours = int(target_offset_str[1:3])
+            minutes = int(target_offset_str[3:5])
+        
+            # 4. Create the target timezone object
+            user_tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+
+            # 5. Convert UTC to the User's Timezone
+            return utc_dt.astimezone(user_tz)
+        
+        except Exception as e:
+            print(f"⚠️ Conversion error: {e}")
+            return dt_input
+
+    def convert_utc_to_selected2(self, utc_dt_str, target_offset_str):
+        """
+        utc_dt_str: '2026-02-21 08:24:36' (Stored UTC)
+        target_offset_str: '+0330' (Your GUI preference)
+        """
+        try:
+            # 1. Parse the stored string as a UTC-aware object
+            utc_dt = datetime.strptime(utc_dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+
+            # 2. Parse your selected offset (+/- HHMM)
+            sign = 1 if target_offset_str[0] == '+' else -1
+            hours = int(target_offset_str[1:3])
+            minutes = int(target_offset_str[3:5])
+        
+            # 3. Create the target timezone object
+            user_tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+
+            # 4. Convert UTC to the User's Timezone
+            return utc_dt.astimezone(user_tz)
+        except Exception as e:
+            print(f"⚠️ Conversion error: {e}")
+            return datetime.strptime(utc_dt_str, "%Y-%m-%d %H:%M:%S")
+
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
         raw_rows = []
@@ -3911,10 +4265,13 @@ class VisualizerWindow(QMainWindow):
             clean_rows = self.decimate_by_download(raw_rows)
             
             # Convert decimated rows into the final cache format
-            data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+            data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}        
+            target_offset = self.selected_timezone.get("offset", "+0000")
+
             for row in clean_rows:
                 # row is (datetime_obj, avg_clients, avg_ups, anchor_down)
-                data['epochs'].append(row[0].timestamp())
+                local_dt = self.convert_utc_to_selected(row[0],target_offset)
+                data['epochs'].append(local_dt.timestamp())
                 data['clients'].append(row[1])
                 data['ups'].append(row[2])
                 data['downs'].append(row[3])
@@ -3926,13 +4283,14 @@ class VisualizerWindow(QMainWindow):
             return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
 
 class VisualizerReportWindow(QMainWindow):
-    def __init__(self, server_list, console):
+    def __init__(self, server_list, console, selected_timezone):
         super().__init__()
         self.setWindowTitle("Conduit Hourly Report Analytics")
         self.resize(1400, 850)
         self.server_list = copy.deepcopy(server_list)
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
+        self.selected_timezone = selected_timezone
         
         d = {
             "server": "---TOTAL---",
@@ -4221,6 +4579,32 @@ class VisualizerReportWindow(QMainWindow):
         except:
             return 0
 
+    def process_to_utc(self, dt_str, offset_str):
+        """
+        dt_str: '2026-02-21 15:22:14' (from your journalctl log)
+        offset_str: '+0330' (from your remote check)
+        """
+
+        try:
+            # 1. Parse the offset (+/- HHMM)
+            sign = 1 if offset_str[0] == '+' else -1
+            hours = int(offset_str[1:3])
+            minutes = int(offset_str[3:5])
+        
+            # 2. Create the Remote Timezone object
+            remote_tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+        
+            # 3. Parse the log date and attach the remote timezone
+            local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=remote_tz)
+        
+            # 4. Convert to UTC
+            utc_dt = local_dt.astimezone(timezone.utc)
+        
+            return utc_dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception as e:
+            print(f"⚠️ Error converting time: {e}")
+            return dt_str # Return original if conversion fails  
+
     def process_raw_file(self, ip):
         """
         Takes the raw journalctl output and converts it to a clean tab-separated log.
@@ -4231,6 +4615,12 @@ class VisualizerReportWindow(QMainWindow):
     
         if not os.path.exists(raw_path):
             return
+
+        offset_str = ""
+        for s in self.server_list:
+            if s.get("ip") == ip:
+                region, offset_str = s.get("timezone").split()
+                break
 
         # 1. Regex to extract: Date, Clients, UP, DOWN
 
@@ -4246,6 +4636,9 @@ class VisualizerReportWindow(QMainWindow):
                     
                         # 2. Format data
                         dt = dt_raw.replace('T', ' ')
+                        if offset_str:
+                            dt = self.process_to_utc(dt, offset_str)
+
 #                        up_bytes = self.parse_to_bytes(up_str)
 #                        down_bytes = self.parse_to_bytes(down_str)
                         up_bytes = int(up_str)
@@ -4599,6 +4992,36 @@ class VisualizerReportWindow(QMainWindow):
             'downs': resampled_downs
         }                
 
+    def convert_utc_to_selected(self, dt_input, target_offset_str):
+        """
+        dt_input: Can be a '2026-02-21...' string OR a datetime object (from decimation)
+        target_offset_str: '+0330'
+        """
+        try:
+            # 1. Get a datetime object regardless of input type
+            if isinstance(dt_input, str):
+                utc_dt = datetime.strptime(dt_input, "%Y-%m-%d %H:%M:%S")
+            else:
+                utc_dt = dt_input  # It's already a datetime object
+            
+            # 2. Ensure it is marked as UTC
+            utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+
+            # 3. Parse your selected offset (+/- HHMM)
+            sign = 1 if target_offset_str[0] == '+' else -1
+            hours = int(target_offset_str[1:3])
+            minutes = int(target_offset_str[3:5])
+        
+            # 4. Create the target timezone object
+            user_tz = timezone(timedelta(hours=sign * hours, minutes=sign * minutes))
+
+            # 5. Convert UTC to the User's Timezone
+            return utc_dt.astimezone(user_tz)
+        
+        except Exception as e:
+            print(f"⚠️ Conversion error: {e}")
+            return dt_input
+
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
         raw_rows = []
@@ -4612,10 +5035,14 @@ class VisualizerReportWindow(QMainWindow):
             
             # Convert decimated rows into the final cache format
             data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+            target_offset = self.selected_timezone.get("offset", "+0000")
+
             for row in raw_rows:
                 # row is (datetime_obj, avg_clients, avg_ups, anchor_down)
-                last_ts = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-                data['epochs'].append(last_ts.timestamp())
+                # Convert UTC string -> Localized Datetime Object
+#                last_ts = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+                local_dt = self.convert_utc_to_selected(str(row[0]), target_offset)                
+                data['epochs'].append(local_dt.timestamp())
                 data['clients'].append(int(row[1]))
                 data['ups'].append(int(row[2]))
                 data['downs'].append(int(row[3]))
