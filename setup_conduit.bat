@@ -4,7 +4,7 @@ cd /d "%USERPROFILE%"
 
 :: Step 2: Ensure pip is updated and install dependencies
 py -m ensurepip --upgrade
-py -m pip install fabric paramiko PyQt5 pyqtgraph
+py -m pip install fabric paramiko PyQt5 pyqtgraph tzdata
 
 :: Step 3: Setup SSH directory and keys
 if not exist ".ssh" mkdir ".ssh"
