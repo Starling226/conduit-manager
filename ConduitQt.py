@@ -1784,7 +1784,7 @@ class ConduitGUI(QMainWindow):
         cfg_lay.addWidget(self.chk_upd)
         self.chk_upd.setChecked(True)
 
-        self.chk_lion_sun = QCheckBox("Sun && Lion")
+        self.chk_lion_sun = QCheckBox("Lion && Sun")
         self.chk_lion_sun.setToolTip("When checked only the Shir O Khorshid Android Client app can connect to Conduit server")
         cfg_lay.addWidget(self.chk_lion_sun)
         self.chk_lion_sun.setChecked(False)
