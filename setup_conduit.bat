@@ -1,4 +1,5 @@
 @echo off
+
 :: Step 1: Change to user profile
 cd /d "%USERPROFILE%"
 
