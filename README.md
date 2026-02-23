@@ -2,12 +2,6 @@
 ## Deploy, monitor, and manage Psiphon Conduit across Windows, Linux, and macOS.
 This repository features an interactive application designed to streamline the deployment and real-time monitoring of Psiphon Conduit on remote Linux servers. Effortlessly manage everything from a single instance to hundreds of servers with minimal overhead.
 
-# 🛡️ Conduit Manager
-**Download:** 🚀 Get Started: Click the button below to download the latest version as a ZIP file, or clone the repository directly.
-
-[ ![Download ZIP](https://img.shields.io/badge/-%3C%3E%20Code%20(ZIP)-2ea44f?style=for-the-badge&logo=github&logoColor=white) ](https://github.com/Starling226/conduit-manager/archive/refs/heads/main.zip)
-
-
 ## Download and Preparations
 1. **Python Instalation:** Please visist https://www.python.org/downloads/ and install the latest python
 
