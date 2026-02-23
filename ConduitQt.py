@@ -3991,21 +3991,30 @@ class VisualizerWindow(QMainWindow):
     def load_all_logs_into_memory(self):
         """Reads logs and creates a Global Total with reboot-resilient summing."""
         self.data_cache.clear()
-        
+
         # Sort excluding the virtual IP for the file-reading phase
         actual_servers = [s for s in self.server_list if s['ip'] != "---.---.---.---"]
         
+        # Calculate the offset in seconds
+        target_offset_str = self.selected_timezone.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
         all_epochs = []
         for server in actual_servers:
             ip = server['ip']
             file_path = f"server_logs{AppState.conduit_id}/{ip}.log"
             if os.path.exists(file_path):
                 data = self.parse_log_file(file_path)
-                self.data_cache[ip] = data
                 print(ip,len(data['epochs']))
+                # --- SHIFT TO IRAN TIME ---
+                # We add the offset to the epochs so the X-axis reflects local wall-clock time
+                data['epochs'] = [t + offset_seconds for t in data['epochs']]
+                
+                self.data_cache[ip] = data
                 if data['epochs']:
                     all_epochs.extend([data['epochs'][0], data['epochs'][-1]])
-
+        
         if not all_epochs:
             return
 
@@ -4267,11 +4276,14 @@ class VisualizerWindow(QMainWindow):
             # Convert decimated rows into the final cache format
             data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}        
             target_offset = self.selected_timezone.get("offset", "+0000")
-
+#            print(self.selected_timezone.get("region"),self.selected_timezone.get("offset"))
             for row in clean_rows:
                 # row is (datetime_obj, avg_clients, avg_ups, anchor_down)
-                local_dt = self.convert_utc_to_selected(row[0],target_offset)
-                data['epochs'].append(local_dt.timestamp())
+#                local_dt = self.convert_utc_to_selected(row[0],target_offset)
+#                if file_path == "server_logs/95.111.229.39.log":
+#                    print(row[0],local_dt)
+
+                data['epochs'].append(row[0].timestamp())
                 data['clients'].append(row[1])
                 data['ups'].append(row[2])
                 data['downs'].append(row[3])
@@ -4898,6 +4910,11 @@ class VisualizerReportWindow(QMainWindow):
         # Sort excluding the virtual IP for the file-reading phase
         actual_servers = [s for s in self.server_list if s['ip'] != "---.---.---.---"]        
         
+        # Calculate the offset in seconds
+        target_offset_str = self.selected_timezone.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
         all_epochs = []
         for server in actual_servers:
             ip = server['ip']
@@ -4905,6 +4922,11 @@ class VisualizerReportWindow(QMainWindow):
             if os.path.exists(file_path):
                 print(f"Reading: {ip}")
                 data = self.parse_log_file(file_path)
+
+                # --- SHIFT TO IRAN TIME ---
+                # We add the offset to the epochs so the X-axis reflects local wall-clock time
+                data['epochs'] = [t + offset_seconds for t in data['epochs']]
+                                
                 self.data_cache[ip] = data
                 if data['epochs']:
                     all_epochs.extend([data['epochs'][0], data['epochs'][-1]])
