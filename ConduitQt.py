@@ -62,6 +62,8 @@ class AppState:
     use_lion_sun = False
     use_sec_inst = False
     conduit_id = ""
+    timezone={"region": "", "offset": ""}
+    display_mode=""
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -1731,6 +1733,8 @@ class ConduitGUI(QMainWindow):
 
         # --- 3. Initial Load of Config ---
         self.load_timezone_config()
+        AppState.timezone = self.selected_timezone
+        AppState.display_mode = AppState.conduit_id
 
         cfgs_frame = QFrame(); 
         cfgs_frame.setFrameShape(QFrame.StyledPanel)
@@ -2171,10 +2175,33 @@ class ConduitGUI(QMainWindow):
             self.health_window = ConduitDashboard(self.console, display_mode, json_file)
         self.health_window.show()
     '''
-
     def open_visualizer(self):
+        # 1. Initialize the window if it doesn't exist
+        if not hasattr(self, 'viz_window') or self.viz_window is None:
+            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
+    
+        # 2. Check if the data source (Conduit ID) has changed
+        if AppState.display_mode != AppState.conduit_id:
+#            print("Data source changed: Re-initializing session and reading disk...")
+            self.viz_window.full_reload(self.selected_timezone)
+    
+        # 3. Check if only the timezone changed
+        elif self.selected_timezone['region'] != AppState.timezone['region']:
+            self.viz_window.update_timezone(self.selected_timezone)
+
+        self.viz_window.show()
+        self.viz_window.raise_() # Bring to front
+
+    def open_visualizer2(self):        
         if not hasattr(self, 'viz_window'):
             self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
+
+        if (self.selected_timezone['region'] != AppState.timezone['region'] or AppState.display_mode != AppState.conduit_id):
+            if AppState.display_mode != AppState.conduit_id:
+                "kill this session and start a new session"
+            else:
+                "update_the_epoch()"
+
         self.viz_window.show()
         self.viz_window.raise_() # Bring to front
         # Trigger initial fetch for current day
@@ -3410,7 +3437,14 @@ class ConduitGUI(QMainWindow):
 class VisualizerWindow(QMainWindow):
     def __init__(self, server_list, console, selected_timezone):
         super().__init__()
-        self.setWindowTitle("Conduit Network Traffic Analytics")
+        if AppState.conduit_id:
+            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
+        else:
+            self.setWindowTitle("Conduit Network Traffic Analytics")
+
+        AppState.timezone = selected_timezone
+        AppState.display_mode = AppState.conduit_id
+
         self.resize(1400, 850)
         self.selected_timezone = selected_timezone
         self.server_list = copy.deepcopy(server_list)
@@ -3580,6 +3614,54 @@ class VisualizerWindow(QMainWindow):
         self.ip_list.currentItemChanged.connect(self.refresh_current_plot)
         self.check_local_data_on_startup()        
         self._is_initializing = False     
+
+    def full_reload(self,selected_timezone):
+        AppState.timezone = selected_timezone
+        AppState.display_mode = AppState.conduit_id
+        self.selected_timezone = selected_timezone
+        self.load_all_logs_into_memory()
+        self.console.appendPlainText(f"Importing data finished.")
+        self.check_local_data_on_startup()
+        self._is_initializing = False        
+        
+        if AppState.conduit_id:
+            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
+        else:
+            self.setWindowTitle("Conduit Network Traffic Analytics")
+
+    def update_timezone(self,selected_timezone):
+        # Restoring to the UTC time
+        # Calculate the offset in seconds
+
+        print("Called update_timezone")
+        target_offset_str = AppState.timezone.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds_old = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
+        target_offset_str = selected_timezone.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds_new = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
+        offset_seconds = -offset_seconds_old + offset_seconds_new
+
+        # Iterate through every IP/Key stored in the cache
+        for ip_key, data in self.data_cache.items():
+        
+            # 1. Verify this entry actually has an 'epochs' list
+            if isinstance(data, dict) and 'epochs' in data:
+            
+                # 2. Apply the offset (Vectorized or List Comp)
+                # Using list comprehension to update the list in-place
+                data['epochs'] = [t + offset_seconds for t in data['epochs']]
+            
+#            print(f"Shifted timezone for: {ip_key}")
+
+        # 3. Important: Update your UI/Plots now that data is shifted
+        self.check_local_data_on_startup()
+        self.selected_timezone = selected_timezone
+        AppState.timezone = selected_timezone
+        AppState.display_mode = AppState.conduit_id        
+        self._is_initializing = False
 
     def sync_disp_ui(self):
         """Updates display text for all items using the hidden IP key."""
@@ -4297,7 +4379,11 @@ class VisualizerWindow(QMainWindow):
 class VisualizerReportWindow(QMainWindow):
     def __init__(self, server_list, console, selected_timezone):
         super().__init__()
-        self.setWindowTitle("Conduit Hourly Report Analytics")
+        if AppState.conduit_id:
+            self.setWindowTitle("Conduit Hourly Report Analytics (Secondary)")
+        else:
+            self.setWindowTitle("Conduit Hourly Report Analytics")        
+
         self.resize(1400, 850)
         self.server_list = copy.deepcopy(server_list)
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
@@ -4926,7 +5012,7 @@ class VisualizerReportWindow(QMainWindow):
                 # --- SHIFT TO IRAN TIME ---
                 # We add the offset to the epochs so the X-axis reflects local wall-clock time
                 data['epochs'] = [t + offset_seconds for t in data['epochs']]
-                                
+
                 self.data_cache[ip] = data
                 if data['epochs']:
                     all_epochs.extend([data['epochs'][0], data['epochs'][-1]])
