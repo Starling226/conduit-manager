@@ -64,6 +64,8 @@ class AppState:
     conduit_id = ""
     timezone={"region": "", "offset": ""}
     display_mode=""
+    timezone2={"region": "", "offset": ""}
+    display_mode2=""
 
 class LogFetcherSignals(QObject):
     """Signals for individual thread status."""
@@ -1735,6 +1737,8 @@ class ConduitGUI(QMainWindow):
         self.load_timezone_config()
         AppState.timezone = self.selected_timezone
         AppState.display_mode = AppState.conduit_id
+        AppState.timezone2 = self.selected_timezone
+        AppState.display_mode2 = AppState.conduit_id
 
         cfgs_frame = QFrame(); 
         cfgs_frame.setFrameShape(QFrame.StyledPanel)
@@ -2141,9 +2145,38 @@ class ConduitGUI(QMainWindow):
 
     '''
 
+    def open_visualizer(self):
+        # 1. Initialize the window if it doesn't exist
+        if not hasattr(self, 'viz_window') or self.viz_window is None:
+            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
+    
+        # 2. Check if the data source (Conduit ID) has changed
+        if AppState.display_mode != AppState.conduit_id:
+#            print("Data source changed: Re-initializing session and reading disk...")
+            self.viz_window.full_reload(self.selected_timezone)
+    
+        # 3. Check if only the timezone changed
+        elif self.selected_timezone['region'] != AppState.timezone['region']:
+            self.viz_window.update_timezone(self.selected_timezone)
+
+        self.viz_window.show()
+        self.viz_window.raise_() # Bring to front
+
     def open_report(self):
-        if not hasattr(self, 'rep_window'):
+
+        # 1. Initialize the window if it doesn't exist
+        if not hasattr(self, 'rep_window') or self.report_window is None:
             self.report_window = VisualizerReportWindow(self.server_data, self.console, self.selected_timezone)
+    
+        # 2. Check if the data source (Conduit ID) has changed
+        if AppState.display_mode2 != AppState.conduit_id:
+#            print("Data source changed: Re-initializing session and reading disk...")
+            self.report_window.full_reload(self.selected_timezone)
+    
+        # 3. Check if only the timezone changed
+        elif self.selected_timezone['region'] != AppState.timezone2['region']:
+            self.report_window.update_timezone(self.selected_timezone)
+
         self.report_window.show()
         self.report_window.raise_() # Bring to front
 
@@ -2163,49 +2196,6 @@ class ConduitGUI(QMainWindow):
             
         self.health_window.show()
         self.health_window.raise_() # Bring to front
-
-    '''
-    def open_system_health_dashboard(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        json_file = os.path.join(base_dir, 'servers.json')
-
-        display_mode = 'server' if self.rad_name.isChecked() else 'ip'
-        
-        if not hasattr(self, 'health_window'):
-            self.health_window = ConduitDashboard(self.console, display_mode, json_file)
-        self.health_window.show()
-    '''
-    def open_visualizer(self):
-        # 1. Initialize the window if it doesn't exist
-        if not hasattr(self, 'viz_window') or self.viz_window is None:
-            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
-    
-        # 2. Check if the data source (Conduit ID) has changed
-        if AppState.display_mode != AppState.conduit_id:
-#            print("Data source changed: Re-initializing session and reading disk...")
-            self.viz_window.full_reload(self.selected_timezone)
-    
-        # 3. Check if only the timezone changed
-        elif self.selected_timezone['region'] != AppState.timezone['region']:
-            self.viz_window.update_timezone(self.selected_timezone)
-
-        self.viz_window.show()
-        self.viz_window.raise_() # Bring to front
-
-    def open_visualizer2(self):        
-        if not hasattr(self, 'viz_window'):
-            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
-
-        if (self.selected_timezone['region'] != AppState.timezone['region'] or AppState.display_mode != AppState.conduit_id):
-            if AppState.display_mode != AppState.conduit_id:
-                "kill this session and start a new session"
-            else:
-                "update_the_epoch()"
-
-        self.viz_window.show()
-        self.viz_window.raise_() # Bring to front
-        # Trigger initial fetch for current day
-#        self.viz_window.start_data_fetch()
 
     def parse_to_bytes(self, s):
         if not s or "0 B" in s or "-" in s: return 0.0
@@ -3633,7 +3623,6 @@ class VisualizerWindow(QMainWindow):
         # Restoring to the UTC time
         # Calculate the offset in seconds
 
-        print("Called update_timezone")
         target_offset_str = AppState.timezone.get("offset", "+0000") # e.g., "+0330"
         sign = 1 if target_offset_str[0] == '+' else -1
         offset_seconds_old = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
@@ -4389,6 +4378,8 @@ class VisualizerReportWindow(QMainWindow):
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
         self.selected_timezone = selected_timezone
+        AppState.timezone2 = selected_timezone
+        AppState.display_mode2 = AppState.conduit_id      
         
         d = {
             "server": "---TOTAL---",
@@ -4553,6 +4544,53 @@ class VisualizerReportWindow(QMainWindow):
         self.ip_list.currentItemChanged.connect(self.refresh_current_plot)
         self.check_local_data_on_startup()        
         self._is_initializing = False     
+
+    def full_reload(self,selected_timezone):
+        AppState.timezone2 = selected_timezone
+        AppState.display_mode2 = AppState.conduit_id
+        self.selected_timezone = selected_timezone
+        self.load_all_logs_into_memory()
+        self.console.appendPlainText(f"Importing data finished.")
+        self.check_local_data_on_startup()
+        self._is_initializing = False        
+
+        if AppState.conduit_id:
+            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
+        else:
+            self.setWindowTitle("Conduit Network Traffic Analytics")
+
+    def update_timezone(self,selected_timezone):
+        # Restoring to the UTC time
+        # Calculate the offset in seconds
+
+        target_offset_str = AppState.timezone2.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds_old = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
+        target_offset_str = selected_timezone.get("offset", "+0000") # e.g., "+0330"
+        sign = 1 if target_offset_str[0] == '+' else -1
+        offset_seconds_new = sign * (int(target_offset_str[1:3]) * 3600 + int(target_offset_str[3:5]) * 60)
+
+        offset_seconds = -offset_seconds_old + offset_seconds_new
+
+        # Iterate through every IP/Key stored in the cache
+        for ip_key, data in self.data_cache.items():
+        
+            # 1. Verify this entry actually has an 'epochs' list
+            if isinstance(data, dict) and 'epochs' in data:
+            
+                # 2. Apply the offset (Vectorized or List Comp)
+                # Using list comprehension to update the list in-place
+                data['epochs'] = [t + offset_seconds for t in data['epochs']]
+            
+#            print(f"Shifted timezone for: {ip_key}")
+
+        # 3. Important: Update your UI/Plots now that data is shifted
+        self.check_local_data_on_startup()
+        self.selected_timezone = selected_timezone
+        AppState.timezone2 = selected_timezone
+        AppState.display_mode2 = AppState.conduit_id      
+        self._is_initializing = False
 
     def set_status_color(self, color_name):
         """Sets the status label color (red for old, dark gray/white for fresh)."""
