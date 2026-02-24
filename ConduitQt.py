@@ -56,7 +56,7 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 
 class AppState:
     use_lion_sun = False
@@ -80,6 +80,9 @@ class ReportFetcher(QRunnable):
 
     def run(self):
         ip = self.server['ip']
+        if self.server['active'] == 0:
+            return
+
         try:
             current_year = datetime.now().year
             remote_path = f"/opt/conduit{AppState.conduit_id}/{current_year}-conduit.log"
@@ -164,6 +167,9 @@ class LogFetcher(QRunnable):
 
     def run(self):
         ip = self.server['ip']
+        if self.server['active'] == 0:
+            return
+
         try:
             # 1. Fetch only relevant lines from journal
 
@@ -340,6 +346,7 @@ class ServerDialog(QDialog):
         self.layout.setContentsMargins(15, 15, 15, 15)
         self.layout.setSpacing(10)
         timezone = self.get_timezone()
+        self.is_active  = 1
 
         self.name_edit = QLineEdit(data['server'] if data else "")
         self.ip_edit = QLineEdit(data['ip'] if data else "")
@@ -347,8 +354,23 @@ class ServerDialog(QDialog):
         self.port_edit = QLineEdit(str(data['port']) if data else "22")
         self.user_edit = QLineEdit(data['user'] if data else "root")
         self.pass_edit = QLineEdit(data['password'] if data else "")
+
+        
+        self.is_active = data['active'] if data else 1
+
         self.pass_edit.setEchoMode(QLineEdit.Password)
         self.tz_edit.setMinimumWidth(160)
+
+        self.lbl_path = QLabel("No file loaded")
+        self.chk_active = QCheckBox("Active")
+        self.chk_active.setToolTip("Un-checked this is if you would like to deactivate this server. When deactive no operaion is permitted for this server")
+
+        if self.is_active == 1:
+            self.chk_active.setChecked(True)
+        else:
+            self.chk_active.setChecked(False)
+
+        self.chk_active.clicked.connect(self.server_status)
 
         self.layout.addRow("Name:", self.name_edit)
         self.layout.addRow("IP/Hostname:", self.ip_edit)
@@ -356,7 +378,8 @@ class ServerDialog(QDialog):
         self.layout.addRow("Port:", self.port_edit)
         self.layout.addRow("Username:", self.user_edit)
         self.layout.addRow("Password:", self.pass_edit)
-        
+        self.layout.addRow("Status:", self.chk_active)
+
         btns = QHBoxLayout()
         self.btn_apply = QPushButton("Apply")
         self.btn_cancel = QPushButton("Cancel")
@@ -373,8 +396,15 @@ class ServerDialog(QDialog):
             "timezone": self.tz_edit.text().strip(),
             "port": self.port_edit.text().strip(),
             "user": self.user_edit.text().strip(),
-            "password": self.pass_edit.text().strip()
+            "password": self.pass_edit.text().strip(),
+            "active": self.is_active
         }
+
+    def server_status(self):
+        if self.chk_active.checkState() == Qt.Checked:
+            self.is_active = 1
+        else:
+            self.is_active = 0
 
     def get_timezone(self):
         current_os = platform.system()
@@ -465,7 +495,11 @@ class AutoStatsWorker(QThread):
         return data_points
 
     def get_stats(self, s):
+
         res = {"ip": s['ip'], "success": False, "clients": "0", "up_val": "0 B", "down_val": "0 B"}
+        if s['active'] == 0:
+            res["clients"] = "Offline"
+            return res
         
         try:
             home = os.path.expanduser("~")
@@ -600,6 +634,10 @@ class ServerWorker(QThread):
                 self.log_signal.emit(f.result())
 
     def ssh_task(self, s):
+
+        if s['active'] == 0:
+            return f"server {s['server']}/{s['ip']} is offline"
+
         try:
 
             p = int(s['port'])
@@ -826,6 +864,10 @@ class StatsWorker(QThread):
             "mbps_1h": "0.00", "up_1h": 0, "down_1h": 0
         }
         
+        if s['active'] == 0:
+            res["uptime_str"] = "Conn Error"
+            return res
+
         try:
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
@@ -1103,6 +1145,9 @@ class DeployWorker(QThread):
             port_num = int(s['port'])
             ssh_port = int(s['port'])
             target_ip = s['ip']
+
+            if s['active'] == 0:
+                return (False, f"[ERROR] {target_ip} is offline", "", target_ip)
 
             if self.params['default_port']:
                 ssh_port = 22
@@ -1474,6 +1519,9 @@ WantedBy=multi-user.target"""
             password = s['password'].strip()
             is_root = (user == "root")
             messages = []
+
+            if s['active'] == 0:
+                return f"[ERROR] {s['ip']} is offline"
 
             if is_root:
                 # Key-based: Explicitly tell Fabric which files to use
@@ -2115,36 +2163,6 @@ class ConduitGUI(QMainWindow):
             
 #        print(f"DEBUG: Now tracking: {item.text()}")
 
-    def handle_item_click2(self, item):
-        """Updates the global tracker whenever any list item is clicked."""
-        self.last_clicked_item = item
-        # Optional: Print to verify it's tracking the right one
-#        print(f"DEBUG: Last clicked is now: {item.text()}")
-
-    '''
-    def debug_selection(self):
-        """Prints the details of the selected item to the console."""
-        # Check both lists
-        sender = self.sender() # Identifies which list was clicked
-        it = sender.currentItem()
-        
-        if it:
-            name_or_ip_text = it.text()
-            hidden_ip = it.data(Qt.UserRole)
-            
-            # Find the actual dictionary in memory
-            data = self.find_data_by_item(it)
-            memory_name = data.get('server') if data else "NOT FOUND"
-            
-            print("--- SELECTION DEBUG ---")
-            print(f"Widget: {sender.objectName()}")
-            print(f"UI Text: {name_or_ip_text}")
-            print(f"Hidden IP (UserRole): {hidden_ip}")
-            print(f"Linked Memory Name: {memory_name}")
-            print("-----------------------")
-
-    '''
-
     def open_visualizer(self):
         # 1. Initialize the window if it doesn't exist
         if not hasattr(self, 'viz_window') or self.viz_window is None:
@@ -2293,7 +2311,7 @@ class ConduitGUI(QMainWindow):
                         item.setForeground(QBrush(COLOR_ONLINE))
                         f = item.font(); f.setBold(True); item.setFont(f)
                 else:
-                    if r["clients"] == "Stopped":
+                    if r["clients"] == "Stopped" or r["clients"] == "Offline":
                         item.setForeground(QBrush(COLOR_OFFLINE))
                         item.setBackground(QBrush(BG_OFFLINE))
                     else:
@@ -2736,6 +2754,11 @@ class ConduitGUI(QMainWindow):
                 for s in self.server_data:
                     if str(s['ip']).strip() == target_text:
                         target_text = str(s['server']).strip()
+                        # SET COLOR BASED ON STATUS
+                        if s.get('active') == 0:
+                            color = QColor('red')
+                            item.setForeground(color)
+
                         break
             
             item.setText(target_text)
@@ -2751,6 +2774,12 @@ class ConduitGUI(QMainWindow):
                 for s in self.server_data:
                     if str(s['ip']).strip() == str(ip_key).strip():
                         it.setText(str(s[attr]).strip())
+                        # SET COLOR BASED ON STATUS
+                        if s.get('active') == 0:
+                            it.setForeground(QColor('red'))
+                        else:
+                            it.setForeground(QColor('black')) # Or your default color
+
                         break
             lw.sortItems()
 
@@ -3016,8 +3045,9 @@ class ConduitGUI(QMainWindow):
                     "ip": s.get('ip', ''),
                     "timezone": s.get('timezone', ''),
                     "port": int(s.get("port", 22)) if s.get("port") else 22,
+                    "active": s.get('active', 1),
                     "user": s.get('user', ''),
-                    "password": s.get('password', '')  # Standardizing to 'password'
+                    "password": s.get('password', '')  # Standardizing to 'password'                    
                 }
                 output_data.append(entry)
 
@@ -3120,41 +3150,6 @@ class ConduitGUI(QMainWindow):
         except Exception as e:
             self.console.appendPlainText(f"❌ Failed to process timezone update: {e}")
 
-    def update_time_zone_json2(self, tz_map):
-        """
-        tz_map: {'1.2.3.4': 'Asia/Tehran +0330', ...}
-        This is called via the signal after ALL threads finish.
-        """
-        filename = "servers.json"
-        if not os.path.exists(filename):
-            return
-
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                servers = json.load(f)
-
-            updated_list = []
-            for s in servers:
-                ip = s.get("ip")
-                if ip in tz_map:
-                    # Rebuild entry to put timezone after ip
-                    new_entry = {}
-                    for k, v in s.items():
-                        new_entry[k] = v
-                        if k == "ip":
-                            new_entry["timezone"] = tz_map[ip]
-                    updated_list.append(new_entry)
-                else:
-                    updated_list.append(s)
-
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(updated_list, f, indent=4)
-        
-            self.log_signal.emit(f"✅ Batch updated timezones for {len(tz_map)} servers in servers.json")
-
-        except Exception as e:
-            self.log_signal.emit(f"❌ Failed to batch update servers.json: {e}")
-
     def remove_password_from_file(self,target_ip):
         filename = "servers.txt"
         if not os.path.exists(filename):
@@ -3184,10 +3179,10 @@ class ConduitGUI(QMainWindow):
                         continue
 
                 if parts[1] == target_ip:
-                    if parts[4] == "root":
+                    if parts[5] == "root":
                         # Reconstruct line without the password
                         # Format: server, ip, port, user, 
-                        new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, {parts[4].strip()}, "
+                        new_line = f"{parts[0].strip()}, {parts[1].strip()}, {parts[2].strip()}, {parts[3].strip()}, {parts[4].strip()}, {parts[5].strip()}, "
                         updated_lines.append(new_line)
                     else:
                         updated_lines.append(line)
@@ -3211,7 +3206,7 @@ class ConduitGUI(QMainWindow):
                 parts = [p.strip() for p in line.split(',')]
 
                 # Basic requirement: server, ip, port, user
-                if len(parts) < 6: continue
+                if len(parts) < 7: continue
 
                 # 1. IP Validation
                 if not self.is_valid_ip(parts[1].strip()):
@@ -3226,8 +3221,8 @@ class ConduitGUI(QMainWindow):
                     continue
 
                 if parts[1] == target_ip:
-                    if parts[4] == "root":
-                        return parts[4].strip(),parts[5].strip()
+                    if parts[5] == "root":
+                        return parts[5].strip(),parts[6].strip()
                     else:
                         return "", ""
 
@@ -3236,8 +3231,8 @@ class ConduitGUI(QMainWindow):
     def load_from_file(self, path):
 
         try:
-            self.server_data.clear()
-            self.pool.clear()
+#            self.server_data.clear()
+#            self.pool.clear()
 
             # Track IP → (line_number, server_name) for duplicate detection
             ip_seen = {}          # ip → first line number where it appeared
@@ -3250,7 +3245,7 @@ class ConduitGUI(QMainWindow):
                         continue
 
                     parts = [p.strip() for p in line.split(',')]
-                    if len(parts) < 6:
+                    if len(parts) < 7:
                         self.console.appendPlainText(
                             f"[NOTICE] Line {i}: too few fields ({len(parts)}), skipped."
                         )
@@ -3294,29 +3289,30 @@ class ConduitGUI(QMainWindow):
                         ip_server_map[ip] = server_name
 
                     # 4. Create entry
+                    '''
                     d = {
                         'server': server_name,
                         'ip': ip,
                         'timezone': timezone,
                         'port': str(port_num),  # string – good for fabric/invoke
-                        'user': parts[4].strip(),
-                        'password': parts[5].strip() if len(parts) > 5 else ''                        
+                        'active': int(parts[4].strip()),
+                        'user': parts[5].strip(),
+                        'password': parts[6].strip() if len(parts) > 6 else ''                     
                     }
 
                     self.server_data.append(d)
                     self.pool.addItem(self.create_item(d))
-
+                    '''
+            '''        
             self.pool.sortItems()
-
             count = len(self.server_data)
             self.console.appendPlainText(f"[*] Successfully imported {len(self.server_data)} servers.")
-#            self.console.appendPlainText(
-#                f"[SUCCESS] {count} server{'s' if count != 1 else ''} imported."
-#            )
+            '''
 
             # Optional: still convert to JSON (now only contains valid + non-duplicate entries)
             self.convert_to_json(input_file=path)
             self.lbl_path.setText(os.path.basename('servers.json'))
+            self.load_servers_from_json(path)
 
         except FileNotFoundError:
             self.console.appendPlainText(f"[ERROR] File not found: {path}")
@@ -3355,14 +3351,16 @@ class ConduitGUI(QMainWindow):
                 s_name = item.get("server", item.get("server", "")).strip()
                 s_pass = item.get("password", item.get("password", ""))
                 s_port = str(item.get("port", "22"))
+                s_active = int(item.get("active", 1))
                 s_user = item.get("user", "root")
-                timezone = item.get("timezone", item.get("timezone", "")).strip()
+                s_timezone = item.get("timezone", item.get("timezone", "")).strip()                
 
                 entry = {
                     "server": s_name,
                     "ip": s_ip,
-                    "timezone": timezone,
+                    "timezone": s_timezone,
                     "port": s_port,
+                    "active": s_active,
                     "user": s_user,
                     "password": s_pass
                 }
@@ -3371,10 +3369,15 @@ class ConduitGUI(QMainWindow):
                 self.server_data.append(entry)
                 seen_ips.add(s_ip)
 
+                # --- COLOR DEFINITION ---
+                # Define red if inactive, otherwise default (black)
+                text_color = QColor('red') if s_active == 0 else QColor('black')
+
                 # 4. Update UI Items
                 # Pool List
                 list_item = QListWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
                 list_item.setData(Qt.UserRole, s_ip)
+                list_item.setForeground(text_color) # Apply color
                 self.pool.addItem(list_item)
 
                 # Table
@@ -3382,6 +3385,7 @@ class ConduitGUI(QMainWindow):
                 self.stats_table.insertRow(row)
                 t_item = QTableWidgetItem(s_name if self.rad_name.isChecked() else s_ip)
                 t_item.setData(Qt.UserRole, s_ip)
+                t_item.setForeground(text_color) # Apply color
                 self.stats_table.setItem(row, 0, t_item)
                 
                 for col in range(1, self.stats_table.columnCount()):
@@ -3409,8 +3413,9 @@ class ConduitGUI(QMainWindow):
                             "ip": data[1].strip(),
                             "timezone": data[2].strip(),
                             "port": int(data[3].strip()),
-                            "user": data[4].strip(),
-                            "password": data[5].strip()
+                            "active": int(data[4].strip()),
+                            "user": data[5].strip(),
+                            "password": data[6].strip()                            
                         }
                         servers_list.append(server_entry)
 
