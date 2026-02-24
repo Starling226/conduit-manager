@@ -75,13 +75,13 @@ To run ConduitQt.py, simply double click on or run them in the command line term
 The Start, Stop, Re-Start, Reset, Status, Upgrade, Deploy allows you to manage your servers efficiently. Sometime even after few hours you have no clients; in that case, you might reset the conduit to get fresh keys and get clients.
 
 ### Using servers.txt
-For the Management and Monitoring, you need to create a `servers.txt` file in the same directory that you run `ConduitQt.py`. After importing the servers.text, it will be automatically converted into `servers.json`. The next time you launch the application, it imports `servers.json` automatically. `servers.json` must be available in the directory you launch the `ConduitQt.py`. You can add, delete, or update the individual server profile within the GUI. If you import `servers.txt` later, it will overwrite the existing `servers.json`. Upon successfull deployment the ssh public key will be injected to the server. You must add root user or a sudoer user for deployment and other processes. Communication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22 but it is recommended to change it to different port to avoid attracting ssh probing your system. You may choose port 2000 < port < 3000. You can leave timezone as --- --- or your server actual timezone. Upon deployment this will be replaced by the actual server timezone automatically. timezone is a remote server timezone and is diffrenet than your client timezone.
+For the Management and Monitoring, you need to create a `servers.txt` file in the same directory that you run `ConduitQt.py`. After importing the servers.text, it will be automatically converted into `servers.json`. The next time you launch the application, it imports `servers.json` automatically. `servers.json` must be available in the directory you launch the `ConduitQt.py`. You can add, delete, or update the individual server profile within the GUI. If you import `servers.txt` later, it will overwrite the existing `servers.json`. Upon successfull deployment the ssh public key will be injected to the server. You must add root user or a sudoer user for deployment and other processes. Communication with the server will be perfomred using the ssh keys after successfull deployment. Default port is 22 but it is recommended to change it to different port to avoid attracting ssh probing your system. You may choose port 2000 < port < 3000. You can leave timezone as --- --- or your server actual timezone. Upon deployment this will be replaced by the actual server timezone automatically. timezone is a remote server timezone and is diffrenet than your client timezone. status field is 1 by default, but you can set it to 0 if server is temporarily offline or decommisioned and you still want to keep the server records for repurpose.
 
 **Format:**
-`name,hostname,timezone,port,username,password`. Do not add this header to servers.txt.
+`name,hostname,timezone,port,status,username,password`. Do not add this header to servers.txt. Add each server records to a different row in your servers.txt.
 
 **Example:**
-`MyServer,123.45.67.89,US/Central -600,22,root,password`
+`MyServer,123.45.67.89,US/Central -600,22,1,root,password`
 
 ## Monitoring
 
