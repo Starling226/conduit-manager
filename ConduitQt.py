@@ -60,7 +60,7 @@ APP_VERSION = "2.5.1"
 
 class AppState:
     use_lion_sun = False
-    use_sec_inst = False
+    is_primary_instance = False
     conduit_id = ""
     timezone={"region": "", "offset": ""}
     display_mode=""
@@ -1096,6 +1096,7 @@ class DeployWorker(QThread):
         self.targets = targets
         self.params = params # password, max_clients, bandwidth, user
         self.action = action
+        self.client_ip = client_ip
 
     def run(self):
         # Read the public key once
@@ -1219,7 +1220,7 @@ class DeployWorker(QThread):
                     return f"[SKIP] {target_ip}: Could not connect or not root."
                 
                 # 1. Key Injection
-                if not AppState.use_sec_inst:
+                if AppState.is_primary_instance:
                     run_cmd("mkdir -p ~/.ssh && chmod 700 ~/.ssh",hide=True)
                     run_cmd(f'echo "{pub_key}" >> ~/.ssh/authorized_keys',hide=True)
                     run_cmd("chmod 600 ~/.ssh/authorized_keys",hide=True)
@@ -1248,7 +1249,7 @@ class DeployWorker(QThread):
                 run_cmd(f"rm -rf /var/lib/conduit{AppState.conduit_id}", warn=True, hide=True)
                 run_cmd(f"mkdir -p /var/lib/conduit{AppState.conduit_id}", hide=True)
                 
-                if not AppState.use_sec_inst:
+                if AppState.is_primary_instance:
                     # install system and network monitoring packages
 
 #                    if run_cmd("command -v dnf", warn=True, hide=True).ok:
@@ -1311,11 +1312,20 @@ WantedBy=multi-user.target
                 stats_script_url = "https://raw.githubusercontent.com/Starling226/conduit-manager/main/get_conduit_stat.py"
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/get_conduit_stat.py {stats_script_url}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/get_conduit_stat.py")
+                
+                if AppState.conduit_id == "2":
+                    offset = 6
+                elif AppState.conduit_id == "3":
+                    offset = 7
+                elif AppState.conduit_id == "4":
+                    offset = 8
+                else:
+                    offset = 5
 
                 # 7. Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
+                cron_cmd = f"{offset} * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit-monitor{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
+                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit-monitor{AppState.conduit_id}.service"
 
 #                run_cmd(f'(crontab -l 2>/dev/null | grep -Fv "/opt/conduit{conduit_id}/get_conduit_stat.py" ; echo "{cron_cmd}") | crontab -', hide=True)
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
@@ -1328,13 +1338,14 @@ WantedBy=multi-user.target
                     exec_cmd = f"/opt/conduit{AppState.conduit_id}/conduit-monitor.sh --stats-file /var/lib/conduit{AppState.conduit_id}/stats.json"
             
                 # setting up the Systemd service for conduit-monitor.sh            
-                           
+                requires = f"conduit{AppState.conduit_id}.service"
+                after = f"conduit{AppState.conduit_id}.service"
                 conduit_monitor_service_config = f"""[Unit]
 Description=Conduit Metric Logger (10s)
 After=network.target
 # Ensure this only runs if Conduit is actually running
-Requires=conduit.service
-After=conduit.service
+Requires={requires}
+After={after}
 
 [Service]
 ExecStart={exec_cmd}
@@ -1380,9 +1391,9 @@ WantedBy=multi-user.target"""
                 else:
                     current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
 
-                
+                if AppState.is_primary_instance:
                 #9. setting up the Systemd service for glances            
-                service_config = """[Unit]
+                    service_config = """[Unit]
 Description=Glances Web Server
 After=network.target
 
@@ -1393,18 +1404,18 @@ Restart=always
 [Install]
 WantedBy=multi-user.target"""
             
-                # 10. Write service file and start
-                run_cmd(f"echo '{service_config}' | sudo tee /etc/systemd/system/glancesweb.service", hide=True)
-                run_cmd("systemctl daemon-reload", hide=True)
-                run_cmd("systemctl enable --now glancesweb.service", hide=True)
-            
-                run_cmd("firewall-cmd --add-port=61208/tcp --permanent", hide=True)
-                cmd = f"""firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="{client_ip}" port protocol="tcp" port="61208" accept'"""
-                run_cmd(cmd, hide=True)
-                run_cmd("firewall-cmd --reload", hide=True)
-
+                    # 10. Write service file and start
+                    run_cmd(f"echo '{service_config}' | sudo tee /etc/systemd/system/glancesweb.service", hide=True)
+                    run_cmd("systemctl daemon-reload", hide=True)
+                    run_cmd("systemctl enable --now glancesweb.service", hide=True)
+                
+                    run_cmd("firewall-cmd --add-port=61208/tcp --permanent", hide=True)
+                    cmd = f"""firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="{self.client_ip}" port protocol="tcp" port="61208" accept'"""
+                    run_cmd(cmd, hide=True)
+                    run_cmd("firewall-cmd --reload", hide=True)
+                
                 # 11. customizing thhe ssh port number
-                if not AppState.use_sec_inst:
+                if AppState.is_primary_instance:
                     config_path = "/etc/ssh/sshd_config"
                     cmd = fr"grep -iP '^#?Port\s+\d+' {config_path} | head -1 | awk '{{print $2}}'"
                     current_port_cmd = run_cmd(cmd, hide=True)
@@ -1651,11 +1662,20 @@ WantedBy=multi-user.target"""
                 full_cmd = f"(crontab -l 2>/dev/null || true) | sed 's/{pattern_old}/{new_service}/g' | crontab -"
                 run_cmd(full_cmd)
                 '''
-                
+
+                if AppState.conduit_id == "2":
+                    offset = 6
+                elif AppState.conduit_id == "3":
+                    offset = 7
+                elif AppState.conduit_id == "4":
+                    offset = 8
+                else:
+                    offset = 5
+
                 # Setup Cronjob (Idempotent: prevents duplicate entries)
-                cron_cmd = f"5 * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
+                cron_cmd = f"{offset} * * * * /usr/bin/python3 /opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit-monitor{AppState.conduit_id}.service >> /opt/conduit{AppState.conduit_id}/cron_sys.log 2>&1"
                 # This command checks if the job exists; if not, it adds it to the crontab
-                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit{AppState.conduit_id}.service"
+                search_pattern = f"/opt/conduit{AppState.conduit_id}/get_conduit_stat.py --work_dir /opt/conduit{AppState.conduit_id} --service conduit-monitor{AppState.conduit_id}.service"
                 run_cmd(f'(crontab -l 2>/dev/null | grep -v -w "{search_pattern}" ; echo "{cron_cmd}") | crontab -', hide=True)
                 
                 # Download conduit-monitor.sh Script from GitHub
@@ -1703,7 +1723,8 @@ class ConduitGUI(QMainWindow):
         self.setMinimumSize(1200, 800)
         self.server_data = [] 
         self.current_path = ""
-
+        self.max_clients = 150
+        self.max_bandwidth = 40
         self.selected_timezone = {"region": "UTC", "offset": "+0000"}
         # Timer for Auto-Refresh
         self.refresh_timer = QTimer()
@@ -1727,6 +1748,23 @@ class ConduitGUI(QMainWindow):
         menubar.setNativeMenuBar(False) 
         
         file_menu = menubar.addMenu('&File')
+
+        # --- Start of New Instance Selection Logic ---
+        instance_menu = file_menu.addMenu('Set Current Instance')
+        self.instances = [
+            ("Instance-1", ""), 
+            ("Instance-2", "2"), 
+            ("Instance-3", "3"), 
+            ("Instance-4", "4")
+        ]
+
+        for name, cid in self.instances:
+            action = QAction(name, self)
+            # Using a lambda with default arguments to capture current loop values
+            action.triggered.connect(lambda checked, n=name, c=cid: self.update_instance(n, c))
+            instance_menu.addAction(action)
+
+        file_menu.addSeparator()
 
         # Import Action
         import_action = QAction('Import servers file', self)
@@ -1760,6 +1798,13 @@ class ConduitGUI(QMainWindow):
         self.lbl_path = QLabel("No file loaded")
         self.lbl_path.setStyleSheet(lbl_style)
         right_menu_layout.addWidget(self.lbl_path)
+
+        self.lbl_instance = QLabel("Instance-1") # Default display
+        self.lbl_instance.setStyleSheet("color: gray; font-style: italic; font-size: 11px; border: none;")
+#        self.lbl_instance.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 11px; border: none;")
+        # Add it BEFORE the lbl_path (which shows the server.json path)
+        right_menu_layout.addWidget(self.lbl_instance)
+        self.current_instance_name = "Instance-1"
 
         # Timezone Label (Middle in menu area)
         self.lbl_timezone = QLabel("") 
@@ -1802,13 +1847,13 @@ class ConduitGUI(QMainWindow):
 
         cfg_lay.addWidget(QLabel("Max Clients:"));
 #        self.edit_clients = QLineEdit("225")
-        self.edit_clients = set_fixed_entry(QLineEdit("225"))
+        self.edit_clients = set_fixed_entry(QLineEdit(f"{self.max_clients}"))
         cfg_lay.addWidget(self.edit_clients)
 
 #        cfg_lay.addWidget(QLabel("Mbps:"));
         cfg_lay.addWidget(QLabel("Bandwidth (Mbps):"));
 #        self.edit_bw = QLineEdit("40.0")
-        self.edit_bw = set_fixed_entry(QLineEdit("40.0"))
+        self.edit_bw = set_fixed_entry(QLineEdit(f"{self.max_bandwidth}"))
         cfg_lay.addWidget(self.edit_bw)
 
         # Field 3: Log Window (The new free parameter - in minutes)
@@ -1840,15 +1885,10 @@ class ConduitGUI(QMainWindow):
         cfg_lay.addWidget(self.chk_upd)
         self.chk_upd.setChecked(True)
 
-        self.chk_lion_sun = QCheckBox("Lion && Sun")
+        self.chk_lion_sun = QCheckBox("Activate Lion && Sun")
         self.chk_lion_sun.setToolTip("When checked only the Shir O Khorshid Android Client app can connect to Conduit server")
         cfg_lay.addWidget(self.chk_lion_sun)
         self.chk_lion_sun.setChecked(False)
-
-        self.chk_sec_inst = QCheckBox("Secondary")
-        self.chk_sec_inst.setToolTip("When checked it manages the secondary running conduit instance")
-        cfg_lay.addWidget(self.chk_sec_inst)
-        self.chk_sec_inst.setChecked(False)
 
         self.rad_name = QRadioButton("Display Name")
         self.rad_ip = QRadioButton("Display IP")
@@ -2026,9 +2066,7 @@ class ConduitGUI(QMainWindow):
         self.btn_to_pool.clicked.connect(self.move_to_pool)
         self.btn_del.clicked.connect(self.delete_srv)
         self.btn_quit.clicked.connect(self.close)
-        self.chk_lion_sun.clicked.connect(self.lion_sun_status)
-        self.chk_sec_inst.clicked.connect(self.secondary_conduit_instance_status)
-        
+        self.chk_lion_sun.clicked.connect(self.lion_sun_status)        
         
 #        self.rad_name.toggled.connect(self.sync_ui)
 #        self.rad_ip.toggled.connect(self.sync_ui)
@@ -2062,6 +2100,30 @@ class ConduitGUI(QMainWindow):
         self.sel.itemDoubleClicked.connect(self.edit_srv)
 
         self.update_timer_interval() # Initialize timer
+
+    def update_instance(self, instance_name, conduit_id):
+        """Updates the AppState and the UI label when an instance is selected."""
+        # 1. Update AppState
+        AppState.conduit_id = conduit_id
+    
+        # Also update display modes as seen in your init logic
+        AppState.display_mode = conduit_id
+        AppState.display_mode2 = conduit_id
+    
+        if instance_name == "Instance-1":
+            AppState.is_primary_instance = True
+        else:
+            AppState.is_primary_instance = False
+
+        # 2. Update UI Label
+        if self.lbl_instance:
+            self.lbl_instance.setText(instance_name)
+    
+        # Optional: Log the change to console
+        self.console.appendPlainText(f"Switching to {instance_name} (ID: '{conduit_id}')")
+        self.current_instance_name = instance_name
+        # If you have logic to refresh data based on instance, call it here:
+        # self.run_auto_stats()
 
     def get_timezone(self):
         current_os = platform.system()
@@ -2141,15 +2203,6 @@ class ConduitGUI(QMainWindow):
             AppState.use_lion_sun = False
         else:
             AppState.use_lion_sun = True
-
-    def secondary_conduit_instance_status(self):
-
-        if self.chk_sec_inst.checkState() != 2:
-            AppState.use_sec_inst = False
-            AppState.conduit_id=""
-        else:
-            AppState.use_sec_inst = True
-            AppState.conduit_id="2"
 
     def handle_item_click(self, item):
         """Updates tracker and ensures only one list has an active selection."""
@@ -2455,9 +2508,39 @@ class ConduitGUI(QMainWindow):
         if port_22_detected:
             port_message = f"Your current port is 22. It is recommnded to choose a port\n in range 2000 to 3000 to avoid active ssh probing your server"
 
+        instance_html = f"<b style='color: red;'>{self.current_instance_name}</b>"
+        read_carefully_html = f"<b style='color: red;'>READ CAREFULLY</b>"
+
+        # 2. Construct the message using HTML tags
+        warning_msg = (
+            "<html>"
+            f"<h3>⚠️ CRITICAL: FRESH DEPLOYMENT {read_carefully_html}</h3>"
+            f"<p>You are about to deploy to: {target_names} ({instance_html})</p>"
+            "<b>This action will:</b>"
+            "<ul>"
+            "<li>Connect as <b>ROOT</b></li>"
+            "<li><b>OVERWRITE</b> any existing conduit installation if this is a re-deployment</li>"
+            "<li><b>RESET</b> all service configurations</li>"
+            f"<li>{port_message}</li>"
+            "</ul>"
+            "<p>Are you absolutely sure you want to proceed?</p>"
+            "</html>"
+        )
+
+        # 3. Create the QMessageBox object
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle("Confirm System Reinstall")
+        msg_box.setText(warning_msg) # This accepts the HTML string
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+
+        # 4. Execute and handle reply
+        reply = msg_box.exec_()
+        '''
         warning_msg = (
             "⚠️ CRITICAL: FRESH DEPLOYMENT\n\n"
-            f"You are about to deploy to: {target_names}\n\n"
+            f"You are about to deploy to: {target_names} <{self.current_instance_name}>\n\n"
             "This action will:\n"
             "• Connect as ROOT\n"
             "• OVERWRITE any existing conduit installation if this is a re-deployment\n"
@@ -2469,16 +2552,16 @@ class ConduitGUI(QMainWindow):
         # Show the dialog with 'No' as the default safe choice
         reply = QMessageBox.warning(
             self, 
-            "Confirm System Reinstall", 
+            f"Confirm System Reinstall", 
             warning_msg,
             QMessageBox.Yes | QMessageBox.No, 
             QMessageBox.No
         )
-
+        '''
         if reply != QMessageBox.Yes:
             self.console.appendPlainText("[CANCELLED] Deployment aborted by user.")
             return
-
+        
         # --- CASE: Single Selection ---
 
         if len(selected_targets) == 1:
@@ -2542,8 +2625,13 @@ class ConduitGUI(QMainWindow):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
+            if not AppState.is_primary_instance:
+                QMessageBox.critical(self, "Instance Error", 
+                                f"You must Set Current Instance to {self.instances[0][0]} for the first time deployment.")
+                return
+
             default_port = True
-            AppState.use_sec_inst = False
+            AppState.is_primary_instance = False
             self.chk_sec_inst.setChecked(False)
         else:
             default_port = False
@@ -2554,8 +2642,8 @@ class ConduitGUI(QMainWindow):
             "clients": validated['clients'], 
             "bw": validated['bw'],
             "update": self.chk_upd.isChecked()
-        }
-
+        }        
+        
         # UI Feedback and Start Thread
         self.btn_deploy.setEnabled(False)
         self.btn_deploy.setText("Deploying...")
@@ -2906,7 +2994,7 @@ class ConduitGUI(QMainWindow):
             self.load_servers_from_json(path)
         
         else:
-            # If it's a TXT, we check for overwrite because load_from_file likely saves to servers.json
+            # If it's a TXT, we check for overwrite because load_from_text_file likely saves to servers.json
             if os.path.exists(local_json):
                 reply = QMessageBox.question(
                     self, 
@@ -2921,7 +3009,7 @@ class ConduitGUI(QMainWindow):
                     return
 
             self.console.appendPlainText(f"[INFO] Converting and importing Text: {os.path.basename(path)}")
-            self.load_from_file(path)
+            self.load_from_text_file(path)
 
     def move_to_sel(self):
         for it in self.pool.selectedItems():
@@ -3096,6 +3184,10 @@ class ConduitGUI(QMainWindow):
         tz_map: {'1.2.3.4': 'Asia/Tehran +0330', ...}
         Only saves to disk if at least one value is different from what's currently stored.
         """
+
+        if AppState.conduit_id:
+            return
+
         filename = "servers.json"
         if not os.path.exists(filename):
             return
@@ -3228,7 +3320,7 @@ class ConduitGUI(QMainWindow):
 
         return "", ""
 
-    def load_from_file(self, path):
+    def load_from_text_file(self, path):
 
         try:
 #            self.server_data.clear()
@@ -3331,6 +3423,7 @@ class ConduitGUI(QMainWindow):
         
         # Track IPs we've already processed in this load session
         seen_ips = set()
+        offline_server_counts = 0
 
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -3390,9 +3483,13 @@ class ConduitGUI(QMainWindow):
                 
                 for col in range(1, self.stats_table.columnCount()):
                     self.format_placeholder_cell(row, col)
+                if s_active == 0:
+                    offline_server_counts += 1
 
             self.pool.sortItems()
             self.console.appendPlainText(f"[OK] {len(self.server_data)} unique servers loaded.")
+            self.console.appendPlainText(f"[OK] {len(self.server_data)-offline_server_counts} servers are active.")
+            self.console.appendPlainText(f"[OK] {offline_server_counts} servers are offline.")
             self.lbl_path.setText(os.path.basename('servers.json'))
             
         except Exception as e:
@@ -5341,6 +5438,9 @@ class GlancesWorker(QThread):
         while True:
             if not self.is_repairing:
                 try:
+                    if self.entry['active'] == 0:
+                        self.stats_updated.emit(self.name, 0.0, 0.0)
+                        continue
                     # 1. Fetch CPU
 #                    r = requests.get(f"http://{self.ip}:61208/api/3/all", timeout=5)
                     r_cpu = requests.get(f"http://{self.ip}:61208/api/3/cpu", timeout=10)
@@ -5511,12 +5611,12 @@ class ServerTile(QWidget):
 #        cpu_color = "#e74c3c" if cpu > 85 else "#2ecc71"
 #        mem_color = "#e74c3c" if mem > 85 else "#2ecc71"
         
-        if cpu > 90 or mem > 90:
+        if cpu > 85 or mem > 85:
             cpu_color = "#e74c3c" # Red Crimson
             mem_color = "#e74c3c" # Red Crimson
-        elif cpu > 70 or mem > 70:
-            cpu_color = "#ffa500" # Orange
-            mem_color = "#ffa500" # Orange
+#        elif cpu > 70 or mem > 70:
+#            cpu_color = "#ffa500" # Orange
+#            mem_color = "#ffa500" # Orange
         else:
             cpu_color = "#2ecc71" # Green
             mem_color = "#2980b9" # Blue
