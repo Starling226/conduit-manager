@@ -5313,99 +5313,86 @@ class RepairWorker(QThread):
     def run(self):
         try:
             local_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
-            ip, user = self.entry['ip'], self.entry['user']
+            ip, user, password = self.entry['ip'], self.entry['user'].strip(), self.entry['password'].strip()
             port = self.entry.get('port', 22)
             home = os.path.expanduser("~")
             key_path = os.path.join(home, ".ssh", "id_conduit")
+            is_root = (user == "root")
 
-            conn = Connection(host=ip, user=user, port=port,
-                              connect_kwargs={"key_filename": key_path, "timeout": 7})
+            if is_root:
+                # Key-based: Explicitly tell Fabric which files to use
+                connect_kwargs = {
+                    "timeout": 10,
+                    "key_filename": [key_path],
+                    "look_for_keys": False,
+                    "allow_agent": False
+                }
+                cfg = Config()
 
-            # --- STEP 1: FIREWALL CHECK ---
-            check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
-            firewall_ok = conn.sudo(check_cmd, hide=True, warn=True).ok
-
-            if not firewall_ok:
-                print(f"[{self.name}] IP change/missing detected. Updating firewall...")
-                # Clean old rules
-                rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
-                for line in rules.splitlines():
-                    if 'port="61208"' in line:
-                        conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
-                
-                # Add new rule
-                new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
-                conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
-                conn.sudo("firewall-cmd --reload", hide=True)
-
-            # --- STEP 2: SERVICE HEALTH CHECK (Put it here!) ---
-            # Check if port is listening
-            port_active = conn.sudo("ss -tulpn | grep :61208", warn=True, hide=True).ok
-            
-            if port_active:
-                # Port is open, but is it "frozen"? Check API response locally
-                api_responsive = conn.run("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
-                if not api_responsive:
-                    print(f"[{self.name}] Service DEADLOCK detected. Restarting...")
-                    conn.sudo("systemctl restart glancesweb", hide=True)
-                else:
-                    print(f"[{self.name}] Service is healthy.")
             else:
-                print(f"[{self.name}] Service is DOWN. Starting...")
-                conn.sudo("systemctl start glancesweb", hide=True)
+                # Password-based
+                connect_kwargs = {"password": password, "timeout": 15}
+                cfg = Config(overrides={'sudo': {'password': password}})
 
-            conn.close()
-            self.finished.emit(self.name, True)
+            with Connection(host=ip, user=user, port=port, connect_kwargs=connect_kwargs, config=cfg) as conn:
+#            conn = Connection(host=ip, user=user, port=port,
+#                              connect_kwargs={"key_filename": key_path, "timeout": 7})
+
+                def run_cmd(cmd, **kwargs):
+ 
+                    kwargs.setdefault('hide', False)
+                    kwargs.setdefault('warn', False)
+                    kwargs.setdefault('timeout', 20)
+
+                    if is_root:
+                        return conn.run(cmd, **kwargs)
+                    else:    
+                        return conn.sudo(cmd, **kwargs)
+
+                # --- STEP 1: FIREWALL CHECK ---
+                check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
+                firewall_ok = run_cmd(check_cmd, hide=True, warn=True).ok
+#                firewall_ok = conn.sudo(check_cmd, hide=True, warn=True).ok
+
+                if not firewall_ok:
+                    print(f"[{self.name}] IP change/missing detected. Updating firewall...")
+                    # Clean old rules
+                    rules = run_cmd("firewall-cmd --list-rich-rules", hide=True).stdout
+    #                rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
+                    for line in rules.splitlines():
+                        if 'port="61208"' in line:
+                            run_cmd(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+#                        conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+                
+                    # Add new rule
+                    new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
+                    run_cmd(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+#                conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+                    run_cmd("firewall-cmd --reload", hide=True)
+#                conn.sudo("firewall-cmd --reload", hide=True)
+
+                # --- STEP 2: SERVICE HEALTH CHECK (Put it here!) ---
+                # Check if port is listening
+                port_active = run_cmd("ss -tulpn | grep :61208", warn=True, hide=True).ok
+#            port_active = conn.sudo("ss -tulpn | grep :61208", warn=True, hide=True).ok
             
-        except Exception as e:
-            print(f"Repair Error on {self.name}: {e}")
-            self.finished.emit(self.name, False)
+                if port_active:
+                    # Port is open, but is it "frozen"? Check API response locally
+                    api_responsive = run_cmd("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
+#                 api_responsive = conn.run("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
+                    if not api_responsive:
+                        print(f"[{self.name}] Service DEADLOCK detected. Restarting...")
+                        run_cmd("systemctl restart glancesweb", hide=True)
+#                    conn.sudo("systemctl restart glancesweb", hide=True)
+                    else:
+                        print(f"[{self.name}] Service is healthy.")
+                else:
+                    print(f"[{self.name}] Service is DOWN. Starting...")
+                    run_cmd("systemctl start glancesweb", hide=True)
+#                conn.sudo("systemctl start glancesweb", hide=True)
 
-    def run2(self):
-        try:
-            # 1. Get current local public IP
-            local_ip = requests.get("https://api.ipify.org", timeout=5).text.strip()
-            
-            ip, user = self.entry['ip'], self.entry['user']
-            port = self.entry.get('port', 22)
-            home = os.path.expanduser("~")
-            key_path = os.path.join(home, ".ssh", "id_conduit")
-
-            conn = Connection(host=ip, user=user, port=port,
-                              connect_kwargs={"key_filename": key_path, "timeout": 7})
-            
-            # 2. Check if the current local_ip is already allowed for this port
-            # We search specifically for the rule containing both our IP and the port
-            check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
-            result = conn.sudo(check_cmd, hide=True, warn=True)
-
-            if result.ok:
-                # Our IP is already correctly configured! 
-                # Just ensure the service is running and exit.
-                print(f"[{self.name}] IP {local_ip} already authorized. Ensuring service is up...")
-                conn.sudo("systemctl start glancesweb", hide=True, warn=True)
-                conn.close()
+#            conn.close()
                 self.finished.emit(self.name, True)
-                return
-
-            # 3. If we are here, the IP has changed or is missing.
-            # Clean out ONLY old rules that don't match our current IP
-            print(f"[{self.name}] IP change detected. Updating firewall to {local_ip}...")
-            rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
-            for line in rules.splitlines():
-                if 'port="61208"' in line:
-                    conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
-            
-            # 4. Apply new rule
-            new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
-            conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
-            conn.sudo("firewall-cmd --reload", hide=True)
-            
-            # 5. Final service kick to ensure the deadlock we found earlier is cleared
-            conn.sudo("systemctl restart glancesweb", warn=True, hide=True)
-            
-            conn.close()
-            self.finished.emit(self.name, True)
             
         except Exception as e:
             print(f"Repair Error on {self.name}: {e}")
@@ -5422,6 +5409,7 @@ class GlancesWorker(QThread):
         self.ip = entry['ip']
         self.fail_count = 0
         self.is_repairing = False
+        self.timeout_start_time = None  # Tracks when the first timeout occurred
 
     def check_ip_reachable(self):
         """Quickly check if the IP is even alive on the network."""
@@ -5439,8 +5427,9 @@ class GlancesWorker(QThread):
         while True:
             if not self.is_repairing:
                 try:
-                    if self.entry['active'] == 0:
+                    if self.entry.get('active', 1) == 0:
                         self.stats_updated.emit(self.name, 0.0, 0.0)
+                        self.msleep(5000)
                         continue
                     # 1. Fetch CPU
 #                    r = requests.get(f"http://{self.ip}:61208/api/3/all", timeout=5)
@@ -5458,7 +5447,8 @@ class GlancesWorker(QThread):
                         mem_val = mem_data.get('percent', 0.0)
                         
                         self.stats_updated.emit(self.name, cpu_val, mem_val)
-                        self.fail_count = 0 
+                        self.fail_count = 0
+                        self.timeout_start_time = None
                     else:
                         # If the service is there but the API path is wrong
                         print(f"[{self.name}] API Path Error: Check Glances Version")
@@ -5467,6 +5457,19 @@ class GlancesWorker(QThread):
                     # This should be MUCH rarer now that we aren't using /all
                     print(f"[{self.name}] Stats update timed out.")
                     self.stats_updated.emit(self.name, 0.0, 0.0)
+
+                    # Start the timer if this is the first timeout in a row
+                    if self.timeout_start_time is None:
+                        self.timeout_start_time = time.time()
+
+                    # Check if 10 minutes (600 seconds) have passed
+                    elapsed = time.time() - self.timeout_start_time
+                    if elapsed >= 600 and self.entry.get('active') == 1:
+                        print(f"[{self.name}] Timeout persisted for 10m. Triggering Repair...")
+                        self.is_repairing = True
+                        self.timeout_start_time = None 
+                        self.needs_repair.emit(self.name)
+
                 except requests.exceptions.ConnectionError:
                     self.fail_count += 1
                     if self.fail_count >= 3:
@@ -5744,8 +5747,13 @@ class ConduitDashboard(QMainWindow):
         self.tiles[name].set_repairing(False)
         # Resume the monitor
         if name in self.workers:
-            self.workers[name].fail_count = 0
-            self.workers[name].is_repairing = False
+            worker = self.workers[name]
+            worker.fail_count = 0
+            worker.timeout_start_time = None # Clear the 10m timer
+            worker.is_repairing = False
+
+#            self.workers[name].fail_count = 0
+#            self.workers[name].is_repairing = False
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); gui = ConduitGUI(); gui.show(); sys.exit(app.exec_())
