@@ -1217,7 +1217,7 @@ class DeployWorker(QThread):
 
                 res = run_cmd("id -u",hide=True, warn=True)
                 if not res.ok:
-                    return f"[SKIP] {target_ip}: Could not connect or not root."
+                    return f"[SKIP] {target_ip}: Could not connect or not root."                
                 
                 # 1. Key Injection
                 if AppState.is_primary_instance:
@@ -1235,19 +1235,7 @@ class DeployWorker(QThread):
                     elif "debian" in os_id or "ubuntu" in os_id:
                         print("Detected Debian-based system.")
                         messages.append("Detected Debian-based system.")
-                        rh_distro = False
-
-                # 2. Cleanup & Directory Prep                
-
-                run_cmd(f"systemctl stop conduit{AppState.conduit_id}", warn=True, hide=True)
-                time.sleep(2)
-                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit", warn=True, hide=True)
-                run_cmd(f"mkdir -p /opt/conduit{AppState.conduit_id}", hide=True)
-
-                # Crucial: The service hardening requires this directory to exist beforehand
-
-                run_cmd(f"rm -rf /var/lib/conduit{AppState.conduit_id}", warn=True, hide=True)
-                run_cmd(f"mkdir -p /var/lib/conduit{AppState.conduit_id}", hide=True)
+                        rh_distro = False                
                 
                 if AppState.is_primary_instance:
                     # install system and network monitoring packages
@@ -1261,9 +1249,58 @@ class DeployWorker(QThread):
                         run_cmd("apt-get update -y", hide=True)
                         run_cmd("apt-get install sed wget policycoreutils selinux-utils policycoreutils-python-utils firewalld curl tcpdump dnsutils net-tools vim htop nload iftop nethogs glances python3-bottle jq -y", hide=True)
 
-                
-                # 3. Download Binary
+                # getting the server timezone
+                tz_string=""
 
+                cmd = "printf '%s %s' $(timedatectl show --property=Timezone --value) $(date +%z)"
+                tz_info_raw = run_cmd(cmd, hide=True).stdout.strip()
+
+                if tz_info_raw and " " in tz_info_raw:
+                    tz_name, offset_str = tz_info_raw.split()
+                    tz_string = f"{tz_name} {offset_str}"
+
+                if AppState.is_primary_instance:
+                    is_running = False
+                    print("Waiting for firewalld to start...")
+                    max_attempts = 10
+                    attempts = 0
+
+                    run_cmd("systemctl start firewalld", hide=True)
+                    run_cmd("systemctl enable firewalld", hide=True)
+                    time.sleep(1) # Short poll interval
+
+                    while attempts < max_attempts:
+                        # Check status
+                        check = run_cmd("firewall-cmd --state", warn=True, hide=True)
+    
+                        # firewall-cmd --state returns exit code 0 if running
+                        if check.ok:
+                            is_running = True
+                            break
+    
+                        attempts += 1
+                        time.sleep(1) # Short poll interval
+                    if is_running:
+                        print("Firewalld is active.")
+                    else:
+                        print("Firewalld is NOT running.")
+                        messages = "Firewalld is NOT running"
+                        return (True, messages, tz_string, target_ip)
+
+                # 2. Cleanup & Directory Prep                
+
+                run_cmd(f"systemctl stop conduit{AppState.conduit_id}", warn=True, hide=True)
+                time.sleep(2)
+                run_cmd(f"rm -f /opt/conduit{AppState.conduit_id}/conduit", warn=True, hide=True)
+                run_cmd(f"mkdir -p /opt/conduit{AppState.conduit_id}", hide=True)
+
+                # Crucial: The service hardening requires this directory to exist beforehand
+
+                run_cmd(f"rm -rf /var/lib/conduit{AppState.conduit_id}", warn=True, hide=True)
+                run_cmd(f"mkdir -p /var/lib/conduit{AppState.conduit_id}", hide=True)
+
+                # 3. Download Binary
+                
                 run_cmd(f"curl -L -o /opt/conduit{AppState.conduit_id}/conduit {CONDUIT_URL}", hide=True)
                 run_cmd(f"chmod +x /opt/conduit{AppState.conduit_id}/conduit")
 
@@ -1390,7 +1427,7 @@ WantedBy=multi-user.target"""
                     messages.append(f"conduit-monitor{AppState.conduit_id} service failed to start: {current_status}")
                 else:
                     current_status = f"[*] {s['server']} ({s['ip']}): { current_status.upper()}"
-
+                
                 if AppState.is_primary_instance:
                 #9. setting up the Systemd service for glances            
                     service_config = """[Unit]
@@ -1404,11 +1441,12 @@ Restart=always
 [Install]
 WantedBy=multi-user.target"""
             
+                    
                     # 10. Write service file and start
                     run_cmd(f"echo '{service_config}' | sudo tee /etc/systemd/system/glancesweb.service", hide=True)
                     run_cmd("systemctl daemon-reload", hide=True)
                     run_cmd("systemctl enable --now glancesweb.service", hide=True)
-                
+                    
                     run_cmd("firewall-cmd --add-port=61208/tcp --permanent", hide=True)
                     cmd = f"""firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="{self.client_ip}" port protocol="tcp" port="61208" accept'"""
                     run_cmd(cmd, hide=True)
@@ -1426,66 +1464,38 @@ WantedBy=multi-user.target"""
                         messages.append(f"Port is already {port_num}. No changes needed.")
                         messages.append(f"[OK] {s['ip']} successfully deployed (Manual Service Config).")
                         messages = " ".join(messages)
-                        return messages
+                        return (True, messages, tz_string, target_ip)
 
                     print(f"Changing SSH port from {current_port} to {port_num}...")
                     messages.append(f"Changing SSH port from {current_port} to {port_num}...")
                     
-                    # 1. Start the service
-                    run_cmd("systemctl start firewalld", hide=True)
-                    run_cmd("systemctl enable firewalld", hide=True)
+                    print("Firewalld is active.")
+                    # Check if SELinux is active before running semanage
+                    if str(port_num) == "22":
+                        run_cmd("firewall-cmd --add-service=ssh --permanent", hide=True)
+                    else:                    
+                        selinux_check = run_cmd("getenforce", warn=True, hide=True)
 
-                    # 2. Loop until firewalld is actually running or we timeout
-                    max_attempts = 10
-                    attempts = 0
-                    is_running = False
+                        # getenforce returns "Enforcing", "Permissive", or "Disabled"
+                        if selinux_check.ok and "Disabled" not in selinux_check.stdout:
+                            print("SELinux is active. Updating policy...")
+                            # 2. Update the SELinux Policy to allow the new port
+                            run_cmd(f"semanage port -a -t ssh_port_t -p tcp {port_num}", warn=True)
+                        else:
+                            print("SELinux is disabled or not installed. Skipping policy update.")                    
 
-                    print("Waiting for firewalld to start...")
+                        # 3. Open the new port in the firewall
+                        run_cmd(f"firewall-cmd --add-port={port_num}/tcp --permanent", hide=True)
 
+                        if str(current_port) == "22":
+                            # 4. Remove the old SSH service from the firewall
+                            run_cmd("firewall-cmd --remove-service=ssh --permanent", hide=True)
+                        else:
+                             # 4. Cleanup: Remove the OLD port/service from firewall                             
+                            run_cmd(f"firewall-cmd --remove-port={current_port}/tcp --permanent", hide=True)                                                
 
-                    while attempts < max_attempts:
-                        # Check status
-                        check = run_cmd("firewall-cmd --state", warn=True, hide=True)
-    
-                        # firewall-cmd --state returns exit code 0 if running
-                        if check.ok:
-                            is_running = True
-                            break
-    
-                        attempts += 1
-                        time.sleep(1) # Short poll interval
-
-                    if is_running:
-                        print("Firewalld is active.")
-                        # Check if SELinux is active before running semanage
-                        if str(port_num) == "22":
-                            run_cmd("firewall-cmd --add-service=ssh --permanent", hide=True)
-                        else:                    
-                            selinux_check = run_cmd("getenforce", warn=True, hide=True)
-
-                            # getenforce returns "Enforcing", "Permissive", or "Disabled"
-                            if selinux_check.ok and "Disabled" not in selinux_check.stdout:
-                                print("SELinux is active. Updating policy...")
-                                # 2. Update the SELinux Policy to allow the new port
-                                run_cmd(f"semanage port -a -t ssh_port_t -p tcp {port_num}", warn=True)
-                            else:
-                                print("SELinux is disabled or not installed. Skipping policy update.")                    
-
-                            # 3. Open the new port in the firewall
-                            run_cmd(f"firewall-cmd --add-port={port_num}/tcp --permanent", hide=True)
-
-                            if str(current_port) == "22":
-                                # 4. Remove the old SSH service from the firewall
-                                run_cmd("firewall-cmd --remove-service=ssh --permanent", hide=True)
-                            else:
-                                 # 4. Cleanup: Remove the OLD port/service from firewall                             
-                                run_cmd(f"firewall-cmd --remove-port={current_port}/tcp --permanent", hide=True)                                                
-
-                            # 5. Reload firewall to apply changes
-                            run_cmd("firewall-cmd --reload", hide=True)
-
-                    else:
-                        print("Firewalld is NOT running. Skipping firewall rules.")
+                        # 5. Reload firewall to apply changes
+                        run_cmd("firewall-cmd --reload", hide=True)
   
                     # 6. Update the SSH configuration File
                     # This regex replaces the existing active Port line regardless of what the number was
@@ -1500,17 +1510,7 @@ WantedBy=multi-user.target"""
                     if rh_distro:
                         run_cmd("systemctl restart sshd", hide=True)
                     else:
-                        run_cmd("systemctl restart ssh", hide=True)
-                    
-                # getting the server timezone
-                tz_string=""
-
-                cmd = "printf '%s %s' $(timedatectl show --property=Timezone --value) $(date +%z)"
-                tz_info_raw = run_cmd(cmd, hide=True).stdout.strip()
-
-                if tz_info_raw and " " in tz_info_raw:
-                    tz_name, offset_str = tz_info_raw.split()
-                    tz_string = f"{tz_name} {offset_str}"
+                        run_cmd("systemctl restart ssh", hide=True)                    
 
                 messages.append(f"[OK] {target_ip} successfully deployed (Manual Service Config).")
                 messages = " ".join(messages)
@@ -1725,6 +1725,7 @@ class ConduitGUI(QMainWindow):
         self.current_path = ""
         self.max_clients = 150
         self.max_bandwidth = 40
+        AppState.is_primary_instance = True
         self.selected_timezone = {"region": "UTC", "offset": "+0000"}
         # Timer for Auto-Refresh
         self.refresh_timer = QTimer()
@@ -1757,7 +1758,7 @@ class ConduitGUI(QMainWindow):
             ("Instance-3", "3"), 
             ("Instance-4", "4")
         ]
-
+        
         for name, cid in self.instances:
             action = QAction(name, self)
             # Using a lambda with default arguments to capture current loop values
@@ -2100,6 +2101,7 @@ class ConduitGUI(QMainWindow):
         self.sel.itemDoubleClicked.connect(self.edit_srv)
 
         self.update_timer_interval() # Initialize timer
+        self.update_instance(self.instances[0][0], self.instances[0][1])
 
     def update_instance(self, instance_name, conduit_id):
         """Updates the AppState and the UI label when an instance is selected."""
@@ -2631,8 +2633,7 @@ class ConduitGUI(QMainWindow):
                 return
 
             default_port = True
-            AppState.is_primary_instance = False
-            self.chk_sec_inst.setChecked(False)
+            AppState.is_primary_instance = True
         else:
             default_port = False
 
