@@ -56,7 +56,7 @@ if conduit_release == "ssmirr":
 
 PSIPHON_CONFIG_URL = "https://raw.githubusercontent.com/Starling226/conduit-cli/master/cli/psiphon_config.json.backup"
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.5.2"
 
 class AppState:
     use_lion_sun = False
@@ -1830,9 +1830,9 @@ class ConduitGUI(QMainWindow):
         # --- 3. Initial Load of Config ---
         self.load_timezone_config()
         AppState.timezone = self.selected_timezone
-        AppState.display_mode = AppState.conduit_id
+#        AppState.display_mode = AppState.conduit_id
         AppState.timezone2 = self.selected_timezone
-        AppState.display_mode2 = AppState.conduit_id
+#        AppState.display_mode2 = AppState.conduit_id
 
         cfgs_frame = QFrame(); 
         cfgs_frame.setFrameShape(QFrame.StyledPanel)
@@ -2109,8 +2109,8 @@ class ConduitGUI(QMainWindow):
         AppState.conduit_id = conduit_id
     
         # Also update display modes as seen in your init logic
-        AppState.display_mode = conduit_id
-        AppState.display_mode2 = conduit_id
+#        AppState.display_mode = conduit_id
+#        AppState.display_mode2 = conduit_id
     
         if instance_name == "Instance-1":
             AppState.is_primary_instance = True
@@ -2219,14 +2219,21 @@ class ConduitGUI(QMainWindow):
 #        print(f"DEBUG: Now tracking: {item.text()}")
 
     def open_visualizer(self):
+
+        current_instance=""
+        for name, cid in self.instances:
+            if cid == AppState.conduit_id:
+                current_instance = name
+                break
+
         # 1. Initialize the window if it doesn't exist
         if not hasattr(self, 'viz_window') or self.viz_window is None:
-            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone)
-    
+            self.viz_window = VisualizerWindow(self.server_data, self.console, self.selected_timezone, current_instance)
+        
         # 2. Check if the data source (Conduit ID) has changed
         if AppState.display_mode != AppState.conduit_id:
 #            print("Data source changed: Re-initializing session and reading disk...")
-            self.viz_window.full_reload(self.selected_timezone)
+            self.viz_window.full_reload(self.selected_timezone, current_instance)
     
         # 3. Check if only the timezone changed
         elif self.selected_timezone['region'] != AppState.timezone['region']:
@@ -2237,14 +2244,20 @@ class ConduitGUI(QMainWindow):
 
     def open_report(self):
 
+        current_instance=""
+        for name, cid in self.instances:
+            if cid == AppState.conduit_id:
+                current_instance = name
+                break
+
         # 1. Initialize the window if it doesn't exist
         if not hasattr(self, 'rep_window') or self.report_window is None:
-            self.report_window = VisualizerReportWindow(self.server_data, self.console, self.selected_timezone)
+            self.report_window = VisualizerReportWindow(self.server_data, self.console, self.selected_timezone, current_instance)
     
         # 2. Check if the data source (Conduit ID) has changed
         if AppState.display_mode2 != AppState.conduit_id:
 #            print("Data source changed: Re-initializing session and reading disk...")
-            self.report_window.full_reload(self.selected_timezone)
+            self.report_window.full_reload(self.selected_timezone, current_instance)
     
         # 3. Check if only the timezone changed
         elif self.selected_timezone['region'] != AppState.timezone2['region']:
@@ -3528,24 +3541,24 @@ class ConduitGUI(QMainWindow):
 
 
 class VisualizerWindow(QMainWindow):
-    def __init__(self, server_list, console, selected_timezone):
+    def __init__(self, server_list, console, selected_timezone, current_instance):
         super().__init__()
-        if AppState.conduit_id:
-            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
-        else:
-            self.setWindowTitle("Conduit Network Traffic Analytics")
+
+        self.setWindowTitle(f"Conduit Network Traffic Analytics ({current_instance})")
 
         AppState.timezone = selected_timezone
         AppState.display_mode = AppState.conduit_id
 
         self.resize(1400, 850)
         self.selected_timezone = selected_timezone
-        self.server_list = copy.deepcopy(server_list)
+#        self.server_list = copy.deepcopy(server_list)
+        self.server_list = [copy.deepcopy(s) for s in server_list if s.get('active') == 1]
 
         d = {
             "server": "---TOTAL---",
             "ip":   "---.---.---.---",
             "port": 22,
+            "active":1,
             "user": "",
             "password": ""
         }
@@ -3708,7 +3721,7 @@ class VisualizerWindow(QMainWindow):
         self.check_local_data_on_startup()        
         self._is_initializing = False     
 
-    def full_reload(self,selected_timezone):
+    def full_reload(self,selected_timezone, current_instance):
         AppState.timezone = selected_timezone
         AppState.display_mode = AppState.conduit_id
         self.selected_timezone = selected_timezone
@@ -3717,10 +3730,7 @@ class VisualizerWindow(QMainWindow):
         self.check_local_data_on_startup()
         self._is_initializing = False        
         
-        if AppState.conduit_id:
-            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
-        else:
-            self.setWindowTitle("Conduit Network Traffic Analytics")
+        self.setWindowTitle(f"Conduit Network Traffic Analytics ({current_instance})")
 
     def update_timezone(self,selected_timezone):
         # Restoring to the UTC time
@@ -3828,7 +3838,7 @@ class VisualizerWindow(QMainWindow):
             ip = self.ip_list.item(0).text()
             if ip in self.data_cache:
                 data = self.data_cache[ip]
-                
+
                 # 4. Explicitly call the plot based on radio state
                 if self.radio_total.isChecked():
                     self.plot_cumulative(data, ip)
@@ -3845,6 +3855,10 @@ class VisualizerWindow(QMainWindow):
                     last_ts = datetime.fromtimestamp(data['epochs'][-1]).strftime("%Y-%m-%d %H:%M:%S")
                     self.status_label.setText(f"Last Sync: {last_ts}")
                     self.set_status_color("red")            
+            else:
+                self.p_clients.clear()
+                self.p_up.clear()
+                self.p_down.clear()                
 
     def start_data_fetch(self):
         """User manually clicked 'Reload'. NOW we start the SSH download."""
@@ -4019,6 +4033,9 @@ class VisualizerWindow(QMainWindow):
             else:
                 self.plot_instantaneous(data_obj) # Pass the object {}
         else:
+            self.p_clients.clear()
+            self.p_up.clear()
+            self.p_down.clear()              
             self.status_label.setText("Last Sync: No Data in Cache")
 
     def refresh_current_plot(self):
@@ -4037,6 +4054,10 @@ class VisualizerWindow(QMainWindow):
                 self.plot_cumulative(data_obj, ip)
             else:
                 self.plot_instantaneous(data_obj)
+        else:
+            self.p_clients.clear()
+            self.p_up.clear()
+            self.p_down.clear()            
 
     def get_dynamic_scale(self, max_value):
         KB = 1024
@@ -4110,14 +4131,16 @@ class VisualizerWindow(QMainWindow):
         epochs = data.get('epochs', [])
         
         # 2. Check for insufficient data
+
         if len(epochs) < 2:
             self.p_up.setTitle("Up (No Data)")
             self.p_down.setTitle("Down (No Data)")
             # Re-enable auto-range so it's ready for the next valid click
             for p in [self.p_clients, self.p_up, self.p_down]:
                 p.enableAutoRange()
+
             return
-        
+
         # 1. Determine the scale based on the highest value in either Up or Down
         max_up = data['ups'][-1] if data['ups'] else 0
         max_down = data['downs'][-1] if data['downs'] else 0
@@ -4180,6 +4203,8 @@ class VisualizerWindow(QMainWindow):
             file_path = f"server_logs{AppState.conduit_id}/{ip}.log"
             if os.path.exists(file_path):
                 data = self.parse_log_file(file_path)
+                if len(data['epochs']) == 0:
+                    continue
                 print(ip,len(data['epochs']))
                 # --- SHIFT TO IRAN TIME ---
                 # We add the offset to the epochs so the X-axis reflects local wall-clock time
@@ -4208,6 +4233,9 @@ class VisualizerWindow(QMainWindow):
 
             for ip in server_ips:
                 data = self.data_cache[ip]
+                if not data:
+                    continue
+
                 idx = cursors[ip]
                 
                 # Counter Reset Check (Server Reboot Detection)
@@ -4436,6 +4464,9 @@ class VisualizerWindow(QMainWindow):
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
         raw_rows = []
+        clean_rows = []
+        data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}     
+
         try:
             with open(file_path, 'r') as f:
                 for line in f:
@@ -4445,10 +4476,14 @@ class VisualizerWindow(QMainWindow):
                         raw_rows.append(parts)
             
             # Apply decimation before converting to final dictionary
+            if not raw_rows:
+                return data
+
             clean_rows = self.decimate_by_download(raw_rows)
             
+            
             # Convert decimated rows into the final cache format
-            data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}        
+            
             target_offset = self.selected_timezone.get("offset", "+0000")
 #            print(self.selected_timezone.get("region"),self.selected_timezone.get("offset"))
             for row in clean_rows:
@@ -4469,15 +4504,14 @@ class VisualizerWindow(QMainWindow):
             return {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
 
 class VisualizerReportWindow(QMainWindow):
-    def __init__(self, server_list, console, selected_timezone):
+    def __init__(self, server_list, console, selected_timezone, current_instance):
         super().__init__()
-        if AppState.conduit_id:
-            self.setWindowTitle("Conduit Hourly Report Analytics (Secondary)")
-        else:
-            self.setWindowTitle("Conduit Hourly Report Analytics")        
+
+        self.setWindowTitle(f"Conduit Hourly Report Analytics ({current_instance})")
 
         self.resize(1400, 850)
-        self.server_list = copy.deepcopy(server_list)
+#        self.server_list = copy.deepcopy(server_list)
+        self.server_list = [copy.deepcopy(s) for s in server_list if s.get('active') == 1]
         self.server_list = sorted(self.server_list, key=lambda x: x['ip'])
         self.console = console
         self.selected_timezone = selected_timezone
@@ -4488,6 +4522,7 @@ class VisualizerReportWindow(QMainWindow):
             "server": "---TOTAL---",
             "ip":   "---.---.---.---",
             "port": 22,
+            "active":1,
             "user": "",
             "password": ""
         }
@@ -4648,7 +4683,7 @@ class VisualizerReportWindow(QMainWindow):
         self.check_local_data_on_startup()        
         self._is_initializing = False     
 
-    def full_reload(self,selected_timezone):
+    def full_reload(self,selected_timezone, current_instance):
         AppState.timezone2 = selected_timezone
         AppState.display_mode2 = AppState.conduit_id
         self.selected_timezone = selected_timezone
@@ -4657,10 +4692,7 @@ class VisualizerReportWindow(QMainWindow):
         self.check_local_data_on_startup()
         self._is_initializing = False        
 
-        if AppState.conduit_id:
-            self.setWindowTitle("Conduit Network Traffic Analytics (Secondary)")
-        else:
-            self.setWindowTitle("Conduit Network Traffic Analytics")
+        self.setWindowTitle(f"Conduit Hourly Report Analytics ({current_instance})")
 
     def update_timezone(self,selected_timezone):
         # Restoring to the UTC time
@@ -4782,7 +4814,11 @@ class VisualizerReportWindow(QMainWindow):
                 if data['epochs']:
                     last_ts = datetime.fromtimestamp(data['epochs'][-1]).strftime("%Y-%m-%d %H:%M:%S")
                     self.status_label.setText(f"Last Sync: {last_ts}")
-                    self.set_status_color("red")            
+                    self.set_status_color("red")
+            else:         
+                self.p_clients.clear()
+                self.p_up.clear()
+                self.p_down.clear()
 
     def start_data_fetch(self):
         """User manually clicked 'Reload'. NOW we start the SSH download."""
@@ -4942,6 +4978,9 @@ class VisualizerReportWindow(QMainWindow):
                 self.plot_report_interval(data_obj, ip)
 
         else:
+            self.p_clients.clear()
+            self.p_up.clear()
+            self.p_down.clear() 
             self.status_label.setText("Last Sync: No Data in Cache")
 
     def refresh_current_plot(self):
@@ -4960,6 +4999,10 @@ class VisualizerReportWindow(QMainWindow):
                 self.plot_report_cumulative(data_obj, ip)
             else:
                 self.plot_report_interval(data_obj, ip)
+        else:
+            self.p_clients.clear()
+            self.p_up.clear()
+            self.p_down.clear() 
 
     def get_dynamic_scale(self, max_value):
         KB = 1024
@@ -5149,6 +5192,8 @@ class VisualizerReportWindow(QMainWindow):
             if os.path.exists(file_path):
                 print(f"Reading: {ip}")
                 data = self.parse_log_file(file_path)
+                if len(data['epochs']) == 0:
+                    continue
 
                 # --- SHIFT TO IRAN TIME ---
                 # We add the offset to the epochs so the X-axis reflects local wall-clock time
@@ -5274,6 +5319,8 @@ class VisualizerReportWindow(QMainWindow):
     def parse_log_file(self, file_path):
         """Converts raw disk text into high-speed memory arrays with decimation."""
         raw_rows = []
+        data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+
         try:
             with open(file_path, 'r') as f:
                 for line in f:
@@ -5283,8 +5330,10 @@ class VisualizerReportWindow(QMainWindow):
                         raw_rows.append(parts)                            
             
             # Convert decimated rows into the final cache format
-            data = {'epochs': [], 'clients': [], 'ups': [], 'downs': []}
+            
             target_offset = self.selected_timezone.get("offset", "+0000")
+            if not raw_rows:
+                return data
 
             for row in raw_rows:
                 # row is (datetime_obj, avg_clients, avg_ups, anchor_down)
@@ -5305,10 +5354,11 @@ class VisualizerReportWindow(QMainWindow):
 class RepairWorker(QThread):
     finished = pyqtSignal(str, bool)
 
-    def __init__(self, name, entry):
+    def __init__(self, name, entry, task):
         super().__init__()
         self.name = name
         self.entry = entry
+        self.task = task
 
     def run(self):
         try:
@@ -5335,8 +5385,6 @@ class RepairWorker(QThread):
                 cfg = Config(overrides={'sudo': {'password': password}})
 
             with Connection(host=ip, user=user, port=port, connect_kwargs=connect_kwargs, config=cfg) as conn:
-#            conn = Connection(host=ip, user=user, port=port,
-#                              connect_kwargs={"key_filename": key_path, "timeout": 7})
 
                 def run_cmd(cmd, **kwargs):
  
@@ -5352,46 +5400,43 @@ class RepairWorker(QThread):
                 # --- STEP 1: FIREWALL CHECK ---
                 check_cmd = f"firewall-cmd --list-rich-rules | grep '{local_ip}' | grep '61208'"
                 firewall_ok = run_cmd(check_cmd, hide=True, warn=True).ok
-#                firewall_ok = conn.sudo(check_cmd, hide=True, warn=True).ok
 
-                if not firewall_ok:
-                    print(f"[{self.name}] IP change/missing detected. Updating firewall...")
-                    # Clean old rules
-                    rules = run_cmd("firewall-cmd --list-rich-rules", hide=True).stdout
-    #                rules = conn.sudo("firewall-cmd --list-rich-rules", hide=True).stdout
-                    for line in rules.splitlines():
-                        if 'port="61208"' in line:
-                            run_cmd(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
-#                        conn.sudo(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
+                print(f"task is :{self.task}")
+                if self.task == "repair":
+
+                    if not firewall_ok:
+                        print(f"[{self.name}] IP change/missing detected. Updating firewall...")
+                        # Clean old rules
+                        rules = run_cmd("firewall-cmd --list-rich-rules", hide=True).stdout
+                        for line in rules.splitlines():
+                            if 'port="61208"' in line:
+                                run_cmd(f"firewall-cmd --permanent --remove-rich-rule='{line.strip()}'", hide=True)
                 
-                    # Add new rule
-                    new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
-                    run_cmd(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
-#                conn.sudo(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
-                    run_cmd("firewall-cmd --reload", hide=True)
-#                conn.sudo("firewall-cmd --reload", hide=True)
+                        # Add new rule
+                        new_rule = f'rule family="ipv4" source address="{local_ip}" port protocol="tcp" port="61208" accept'
+                        run_cmd(f"firewall-cmd --permanent --add-rich-rule='{new_rule}'", hide=True)
+                        run_cmd("firewall-cmd --reload", hide=True)
 
-                # --- STEP 2: SERVICE HEALTH CHECK (Put it here!) ---
-                # Check if port is listening
-                port_active = run_cmd("ss -tulpn | grep :61208", warn=True, hide=True).ok
-#            port_active = conn.sudo("ss -tulpn | grep :61208", warn=True, hide=True).ok
+                    # --- STEP 2: SERVICE HEALTH CHECK (Put it here!) ---
+                    # Check if port is listening
+                    port_active = run_cmd("ss -tulpn | grep :61208", warn=True, hide=True).ok
             
-                if port_active:
-                    # Port is open, but is it "frozen"? Check API response locally
-                    api_responsive = run_cmd("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
-#                 api_responsive = conn.run("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
-                    if not api_responsive:
-                        print(f"[{self.name}] Service DEADLOCK detected. Restarting...")
-                        run_cmd("systemctl restart glancesweb", hide=True)
-#                    conn.sudo("systemctl restart glancesweb", hide=True)
+                    if port_active:
+                        # Port is open, but is it "frozen"? Check API response locally
+                        api_responsive = run_cmd("curl -s -m 2 http://127.0.0.1:61208/api/3/version", warn=True, hide=True).ok
+                        if not api_responsive:
+                            print(f"[{self.name}] Service DEADLOCK detected. Restarting...")
+                            run_cmd("systemctl restart glancesweb", hide=True)
+                        else:
+                            print(f"[{self.name}] Service is healthy.")
                     else:
-                        print(f"[{self.name}] Service is healthy.")
+                        print(f"[{self.name}] Service is DOWN. Starting...")
+                        run_cmd("systemctl start glancesweb", hide=True)
                 else:
-                    print(f"[{self.name}] Service is DOWN. Starting...")
-                    run_cmd("systemctl start glancesweb", hide=True)
-#                conn.sudo("systemctl start glancesweb", hide=True)
+                    if firewall_ok:
+                        print(f"[{self.name}] Service is DOWN. Re-Starting...")
+                        run_cmd("systemctl restart glancesweb", hide=True)
 
-#            conn.close()
                 self.finished.emit(self.name, True)
             
         except Exception as e:
@@ -5401,6 +5446,7 @@ class RepairWorker(QThread):
 class GlancesWorker(QThread):
     stats_updated = pyqtSignal(str, float, float)
     needs_repair = pyqtSignal(str)
+    needs_restart = pyqtSignal(str)
 
     def __init__(self, name, entry):
         super().__init__()
@@ -5464,11 +5510,11 @@ class GlancesWorker(QThread):
 
                     # Check if 10 minutes (600 seconds) have passed
                     elapsed = time.time() - self.timeout_start_time
-                    if elapsed >= 600 and self.entry.get('active') == 1:
-                        print(f"[{self.name}] Timeout persisted for 10m. Triggering Repair...")
+                    if elapsed >= 300 and self.entry.get('active') == 1:
+                        print(f"[{self.name}] Timeout persisted for 5m. Triggering Restart...")
                         self.is_repairing = True
                         self.timeout_start_time = None 
-                        self.needs_repair.emit(self.name)
+                        self.needs_restart.emit(self.name)
 
                 except requests.exceptions.ConnectionError:
                     self.fail_count += 1
@@ -5708,6 +5754,11 @@ class ConduitDashboard(QMainWindow):
             with open(json_file, 'r') as f:
                 servers = json.load(f)
             
+            servers = sorted(
+                [s for s in servers if s.get('active') == 1],
+                key=lambda x: x.get(self.display_mode, "")
+            )
+
             cols = 7
             for i, entry in enumerate(servers):
                 name = entry['server']
@@ -5721,6 +5772,8 @@ class ConduitDashboard(QMainWindow):
                 worker = GlancesWorker(name, entry)
                 worker.stats_updated.connect(self.update_tile)
                 worker.needs_repair.connect(self.trigger_repair)
+                worker.needs_restart.connect(self.trigger_restart)
+                
                 worker.start()
                 self.workers[name] = worker
         except Exception as e:
@@ -5737,11 +5790,20 @@ class ConduitDashboard(QMainWindow):
     def trigger_repair(self, name):
         self.tiles[name].set_repairing(True)
         # Launch repair in background so GUI stays smooth
-        repairer = RepairWorker(name, self.server_data[name])
+        repairer = RepairWorker(name, self.server_data[name],"repair")
         repairer.finished.connect(self.on_repair_finished)
         repairer.start()
         # Prevent GC
         setattr(self, f"repair_{name}", repairer)
+
+    def trigger_restart(self, name):
+        self.tiles[name].set_repairing(True)
+        # Launch repair in background so GUI stays smooth
+        repairer = RepairWorker(name, self.server_data[name],"restart")
+        repairer.finished.connect(self.on_repair_finished)
+        repairer.start()
+        # Prevent GC
+        setattr(self, f"restart{name}", repairer)
 
     def on_repair_finished(self, name, success):
         self.tiles[name].set_repairing(False)
